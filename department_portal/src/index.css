@@ -1,0 +1,28 @@
+@import url('https://fonts.googleapis.com/css2?family=Source+Sans+3:wght@400;500;600;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  font-family: 'Source Sans 3', sans-serif;
+  background: #F8FAFC;
+  color: #0F172A;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 1024px;
+  background: #F8FAFC;
+  color: #0F172A;
+}
+
+@media (max-width: 1024px) {
+  body {
+    min-width: 0;
+  }
+}
