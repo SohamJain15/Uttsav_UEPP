@@ -1,14 +1,17 @@
 import os
-from supabase import create_client, Client
+
 from dotenv import load_dotenv
+from supabase import Client, create_client
 
 load_dotenv()
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY") # Use Service Key for backend operations
+SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 
-if not SUPABASE_URL or not SUPABASE_KEY:
-    raise ValueError("Supabase credentials are missing in the .env file")
+if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
+    raise ValueError(
+        "Supabase credentials are missing in the .env file "
+        "(required: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)"
+    )
 
-# Initialize the Supabase client
-db: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+db: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
