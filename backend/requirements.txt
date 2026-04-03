@@ -4,3 +4,8 @@ supabase
 pydantic
 python-dotenv
 python-multipart
+numpy
+pandas
+joblib
+scikit-learn
+shap

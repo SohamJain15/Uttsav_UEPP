@@ -1,0 +1,332 @@
+{
+  "metadata": {
+    "name": "UTTSAV Rulebook",
+    "version": "2026-04-04",
+    "scope": "Portal UI guidance + India event-permission compliance references",
+    "legal_note": "Guidance only. Final approvals and conditions are decided by competent local authorities."
+  },
+  "documents": [
+    {
+      "id": "ui-step-0-event-details",
+      "title": "Portal Step 1: Event Details",
+      "type": "ui_flow",
+      "jurisdiction": "UTTSAV Portal",
+      "keywords": [
+        "event name",
+        "event type",
+        "crowd size",
+        "start date",
+        "end date",
+        "start time",
+        "end time",
+        "validation"
+      ],
+      "content": "Step 1 requires eventName, eventType, crowdSize, startDate, endDate, startTime and endTime. Missing fields block forward movement. Crowd size influences risk analysis and department routing.",
+      "ui_steps": [0],
+      "source": {
+        "label": "UTTSAV UI Form Logic",
+        "url": "local://user-portal/src/components/MultiStepForm.jsx",
+        "verified_on": "2026-04-04"
+      }
+    },
+    {
+      "id": "ui-step-1-venue-details",
+      "title": "Portal Step 2: Venue Details",
+      "type": "ui_flow",
+      "jurisdiction": "UTTSAV Portal",
+      "keywords": [
+        "venue name",
+        "venue type",
+        "address",
+        "city",
+        "ward number",
+        "venue ownership",
+        "map pin",
+        "latitude",
+        "longitude"
+      ],
+      "content": "Step 2 requires venueName, venueType, address, city, wardNumber and venueOwnership. Map location (latitude/longitude/address) should be captured via the map picker. If venue ownership is Venue Booking, venue owner consent is required.",
+      "ui_steps": [1],
+      "source": {
+        "label": "UTTSAV UI Form Logic",
+        "url": "local://user-portal/src/components/MultiStepForm.jsx",
+        "verified_on": "2026-04-04"
+      }
+    },
+    {
+      "id": "ui-step-2-infrastructure",
+      "title": "Portal Step 3: Infrastructure",
+      "type": "ui_flow",
+      "jurisdiction": "UTTSAV Portal",
+      "keywords": [
+        "stage",
+        "sound system",
+        "temporary structures",
+        "food stalls",
+        "fireworks"
+      ],
+      "content": "Step 3 captures infrastructure toggles: stageRequired, soundSystem, temporaryStructures, foodStalls and fireworks. These fields impact both risk score and department routing.",
+      "ui_steps": [2],
+      "source": {
+        "label": "UTTSAV UI Form Logic",
+        "url": "local://user-portal/src/components/MultiStepForm.jsx",
+        "verified_on": "2026-04-04"
+      }
+    },
+    {
+      "id": "ui-step-3-safety",
+      "title": "Portal Step 4: Safety",
+      "type": "ui_flow",
+      "jurisdiction": "UTTSAV Portal",
+      "keywords": [
+        "security personnel",
+        "medical facility",
+        "first aid",
+        "ambulance",
+        "crowd management plan"
+      ],
+      "content": "Step 4 requires securityPersonnelCount. Medical facility, first-aid and ambulance toggles strengthen preparedness. CrowdManagementPlan upload becomes required when expected crowd exceeds 500.",
+      "ui_steps": [3],
+      "source": {
+        "label": "UTTSAV UI Form Logic",
+        "url": "local://user-portal/src/components/MultiStepForm.jsx",
+        "verified_on": "2026-04-04"
+      }
+    },
+    {
+      "id": "ui-step-4-traffic",
+      "title": "Portal Step 5: Traffic Impact",
+      "type": "ui_flow",
+      "jurisdiction": "UTTSAV Portal",
+      "keywords": [
+        "road closure",
+        "parking",
+        "traffic impact",
+        "public announcement"
+      ],
+      "content": "Step 5 requires parkingCapacity and trafficImpact. If roadClosureRequired is true, traffic police clearance and route planning are expected before final approval.",
+      "ui_steps": [4],
+      "source": {
+        "label": "UTTSAV UI Form Logic",
+        "url": "local://user-portal/src/components/MultiStepForm.jsx",
+        "verified_on": "2026-04-04"
+      }
+    },
+    {
+      "id": "ui-step-5-waste",
+      "title": "Portal Step 6: Waste Management",
+      "type": "ui_flow",
+      "jurisdiction": "UTTSAV Portal",
+      "keywords": [
+        "waste disposal",
+        "cleaning contractor",
+        "dustbins",
+        "large event"
+      ],
+      "content": "Step 6 collects wasteDisposalPlan, cleaningContractor and numberOfDustbins. For large events these fields are mandatory. Waste planning reduces rejection risk for public-ground and food-stall events.",
+      "ui_steps": [5],
+      "source": {
+        "label": "UTTSAV UI Form Logic",
+        "url": "local://user-portal/src/components/MultiStepForm.jsx",
+        "verified_on": "2026-04-04"
+      }
+    },
+    {
+      "id": "ui-step-6-documents",
+      "title": "Portal Step 7: Documents",
+      "type": "ui_flow",
+      "jurisdiction": "UTTSAV Portal",
+      "keywords": [
+        "document upload",
+        "id proof",
+        "owner consent",
+        "insurance",
+        "crowd management plan"
+      ],
+      "content": "Step 7 enforces required uploads. Organizer ID Proof is always required. Venue Owner Consent is required for booked venues. Crowd Management Plan is required above 500 attendees. Insurance Certificate is required for large events.",
+      "ui_steps": [6],
+      "source": {
+        "label": "UTTSAV UI Form Logic",
+        "url": "local://user-portal/src/components/MultiStepForm.jsx",
+        "verified_on": "2026-04-04"
+      }
+    },
+    {
+      "id": "rule-noise-loudspeaker",
+      "title": "Noise Rules: Loudspeaker Permissions and Time Restrictions",
+      "type": "gov_rule",
+      "jurisdiction": "India (State authority implementation)",
+      "keywords": [
+        "loudspeaker",
+        "sound",
+        "music",
+        "10 pm",
+        "noise",
+        "permission",
+        "public address"
+      ],
+      "content": "Under the Noise Pollution (Regulation and Control) Rules, 2000, loudspeakers/public address systems require written permission from the competent authority. Night-time use (10:00 PM to 6:00 AM) is generally restricted, with limited state-notified festive exemptions up to 12:00 midnight under conditions.",
+      "source": {
+        "label": "Central Pollution Control Board (Noise Rules text)",
+        "url": "https://cpcb.gov.in/noise-pollution/",
+        "verified_on": "2026-04-04"
+      }
+    },
+    {
+      "id": "rule-food-stalls-fssai",
+      "title": "Food Stalls: FSSAI Licensing/Registration via FoSCoS",
+      "type": "gov_rule",
+      "jurisdiction": "India",
+      "keywords": [
+        "food stalls",
+        "fssai",
+        "license",
+        "registration",
+        "foscos",
+        "food business"
+      ],
+      "content": "When food stalls are part of an event, organizers and participating food business operators should ensure valid FSSAI licensing/registration as applicable. The official compliance platform is FoSCoS.",
+      "source": {
+        "label": "FSSAI Licensing/FoSCoS",
+        "url": "https://fssai.gov.in/cms/foscos.php",
+        "verified_on": "2026-04-04"
+      }
+    },
+    {
+      "id": "rule-fireworks-peso",
+      "title": "Fireworks: Explosives Rule Compliance (PESO Reference)",
+      "type": "gov_rule",
+      "jurisdiction": "India + local police/fire authority conditions",
+      "keywords": [
+        "fireworks",
+        "explosives",
+        "peso",
+        "display",
+        "noise limit"
+      ],
+      "content": "Fireworks use should comply with Explosives Rules and only authorized categories/conditions. Event organizers should coordinate approvals from local police/fire authorities and comply with PESO-referenced safety constraints, including permitted items and sound limits.",
+      "source": {
+        "label": "PESO Authorized Fireworks",
+        "url": "https://www.peso.gov.in/web/en/authorized-fireworks",
+        "verified_on": "2026-04-04"
+      }
+    },
+    {
+      "id": "rule-crowd-management-ndma",
+      "title": "Mass Gathering Safety Planning (NDMA Guide)",
+      "type": "gov_rule",
+      "jurisdiction": "India",
+      "keywords": [
+        "crowd management",
+        "stampede",
+        "evacuation",
+        "mass gathering",
+        "district administration"
+      ],
+      "content": "NDMA crowd-management guidance emphasizes proactive planning, hazard/risk assessment, clear stakeholder roles, emergency response readiness, and organizer accountability at mass gatherings. Organizers should maintain crowd management and emergency evacuation plans for high-footfall events.",
+      "source": {
+        "label": "NDMA Crowd Management Guide (2014)",
+        "url": "https://sdma.goa.gov.in/sites/default/files/2022-05/managingcrowdsguide.pdf",
+        "verified_on": "2026-04-04"
+      }
+    },
+    {
+      "id": "rule-police-public-gathering-permission",
+      "title": "Public Rally/Meeting/Procession Permission",
+      "type": "gov_rule",
+      "jurisdiction": "State/City police authority",
+      "keywords": [
+        "public rally",
+        "procession",
+        "meeting",
+        "morcha",
+        "dharna",
+        "permission",
+        "commissioner",
+        "district magistrate"
+      ],
+      "content": "For rallies, processions, public meetings and amplified sound use, organizers should obtain permission from the competent local authority (typically Commissioner of Police or District Magistrate). Conditions can include route control, timing, public order safeguards and liability obligations.",
+      "source": {
+        "label": "Maharashtra State Police FAQ + Mumbai Procession Terms",
+        "url": "https://www.mahapolice.gov.in/faq/",
+        "verified_on": "2026-04-04"
+      }
+    },
+    {
+      "id": "rule-road-closure-traffic-permission",
+      "title": "Road Closure / Traffic Movement Permissions",
+      "type": "gov_rule",
+      "jurisdiction": "City traffic police",
+      "keywords": [
+        "road closure",
+        "traffic diversion",
+        "route permission",
+        "no entry",
+        "traffic police"
+      ],
+      "content": "If an event affects roads or route movement, organizers should apply to the relevant traffic police authority for entry/diversion permissions and comply with imposed route/time conditions before event date.",
+      "source": {
+        "label": "Delhi Traffic No-Entry Permission Portal",
+        "url": "https://traffic.delhipolice.gov.in/nep/index.php",
+        "verified_on": "2026-04-04"
+      }
+    },
+    {
+      "id": "rule-temporary-structure-fire-safety",
+      "title": "Temporary Structures/Pandals Fire Precautions",
+      "type": "gov_rule",
+      "jurisdiction": "Local fire service authority",
+      "keywords": [
+        "temporary structure",
+        "pandal",
+        "fire exits",
+        "emergency light",
+        "fire extinguisher"
+      ],
+      "content": "Temporary structures should follow fire safety precautions such as adequate exits, emergency lighting, non-combustible separation near kitchens, and controls on fireworks/open flames near structure boundaries. Event venues should have valid fire NOC/FSC where applicable.",
+      "source": {
+        "label": "Delhi Fire Service Temporary Structures Guidance",
+        "url": "https://dfs.delhi.gov.in/dfs/temporary-structures-0",
+        "verified_on": "2026-04-04"
+      }
+    },
+    {
+      "id": "rule-disaster-management-framework",
+      "title": "Disaster Management Framework and Authority Roles",
+      "type": "gov_rule",
+      "jurisdiction": "India",
+      "keywords": [
+        "disaster management act",
+        "ndma",
+        "state authority",
+        "district authority",
+        "preparedness"
+      ],
+      "content": "The Disaster Management Act, 2005 establishes national/state/district responsibilities for preparedness, mitigation and response. Large events should align with district-level disaster management expectations and emergency coordination norms.",
+      "source": {
+        "label": "Ministry of Home Affairs - Disaster Management Act, 2005",
+        "url": "https://www.mha.gov.in/sites/default/files/The%20Disaster%20Management%20Act%2C%202005.pdf",
+        "verified_on": "2026-04-04"
+      }
+    },
+    {
+      "id": "rule-solid-waste-event-obligations",
+      "title": "Waste Segregation and Municipal Compliance",
+      "type": "gov_rule",
+      "jurisdiction": "India + local body bye-laws",
+      "keywords": [
+        "waste disposal",
+        "segregation",
+        "municipality",
+        "dustbin",
+        "cleanup"
+      ],
+      "content": "Event waste plans should include source segregation, collection logistics and handover to local systems, aligned with Solid Waste Management Rules and municipal bye-laws. Larger public events should define cleanup responsibility and contractor accountability.",
+      "source": {
+        "label": "MoEFCC publication referencing Solid Waste Management Rules, 2016",
+        "url": "https://moef.gov.in/uploads/pdf-uploads/pdf_6866789d67ad67.36423743.pdf",
+        "verified_on": "2026-04-04"
+      }
+    }
+  ]
+}

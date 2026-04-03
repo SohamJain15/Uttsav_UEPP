@@ -1,14 +1,16 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { CheckCircle2 } from "lucide-react";
 import DepartmentBadge from "./DepartmentBadge";
 import FileUploadCard from "./FileUploadCard";
 import FormInput from "./FormInput";
 import GoogleMapPicker from "./GoogleMapPicker";
+import ComplianceAssistant from "./ComplianceAssistant";
 import ProgressStepper from "./ProgressStepper";
 import ReviewCard from "./ReviewCard";
 import ToggleSwitch from "./ToggleSwitch";
 import { determineDepartments, useApplicationForm } from "../hooks/useApplicationForm";
+import { applicationService } from "../services/applicationService";
 
 const EVENT_TYPE_OPTIONS = [
   { value: "", label: "Select event type" },
@@ -40,6 +42,11 @@ const TRAFFIC_OPTIONS = [
   { value: "High", label: "High" },
 ];
 
+const ROUTE_MODE_OPTIONS = [
+  { value: "walking", label: "Walking Procession" },
+  { value: "driving", label: "Vehicle Rally" },
+];
+
 const DOCUMENT_FIELDS = [
   { key: "organizerIdProof", title: "Organizer ID Proof" },
   { key: "venueOwnerConsent", title: "Venue Owner Consent" },
@@ -67,6 +74,12 @@ const MultiStepForm = () => {
   const navigate = useNavigate();
   const [documentError, setDocumentError] = useState("");
   const [submittedApplication, setSubmittedApplication] = useState(null);
+  const [riskAnalysis, setRiskAnalysis] = useState(null);
+  const [isRiskLoading, setIsRiskLoading] = useState(false);
+  const [approvalPrediction, setApprovalPrediction] = useState(null);
+  const [isApprovalLoading, setIsApprovalLoading] = useState(false);
+  const [routeCollision, setRouteCollision] = useState(null);
+  const [isCollisionLoading, setIsCollisionLoading] = useState(false);
   const {
     methods,
     currentStep,
@@ -80,13 +93,124 @@ const MultiStepForm = () => {
     uploadedDocuments,
     setDocument,
     formData,
+    updateMapLocation,
+    buildSubmissionPayload,
   } = useApplicationForm();
 
   const venueOwnership = methods.watch("venueOwnership");
   const selectedMapLatitude = methods.watch("mapLatitude");
   const selectedMapLongitude = methods.watch("mapLongitude");
+  const isMovingProcession = Boolean(methods.watch("isMovingProcession"));
+  const preferredRouteId = methods.watch("preferredRouteId");
   const crowdSize = Number(methods.watch("crowdSize") || 0);
   const isLargeEvent = eventSize === "LARGE";
+  const approvalWatchValues = methods.watch([
+    "eventType",
+    "crowdSize",
+    "startDate",
+    "endDate",
+    "startTime",
+    "endTime",
+    "venueType",
+    "mapLatitude",
+    "mapLongitude",
+    "roadClosureRequired",
+    "trafficImpact",
+    "fireworks",
+    "foodStalls",
+  ]);
+  const collisionWatchValues = methods.watch([
+    "isMovingProcession",
+    "routeOrigin",
+    "routeDestination",
+    "startDate",
+    "endDate",
+    "startTime",
+    "endTime",
+    "routeMode",
+    "routeAlternatives",
+    "preferredRouteId",
+    "mapLatitude",
+    "mapLongitude",
+  ]);
+
+  useEffect(() => {
+    const [eventType, expectedCrowd, startDate] = approvalWatchValues;
+    const shouldRunForecast = Boolean(eventType) && Boolean(startDate) && Number(expectedCrowd || 0) > 0;
+
+    if (!shouldRunForecast) {
+      setApprovalPrediction(null);
+      setIsApprovalLoading(false);
+      return undefined;
+    }
+
+    let isCancelled = false;
+    const timerId = setTimeout(async () => {
+      setIsApprovalLoading(true);
+      try {
+        const forecast = await applicationService.predictApprovalProbability(methods.getValues());
+        if (!isCancelled) {
+          setApprovalPrediction(forecast);
+        }
+      } finally {
+        if (!isCancelled) {
+          setIsApprovalLoading(false);
+        }
+      }
+    }, 900);
+
+    return () => {
+      isCancelled = true;
+      clearTimeout(timerId);
+    };
+  }, [currentStep, methods, ...approvalWatchValues]);
+
+  useEffect(() => {
+    const [moving, routeOrigin, routeDestination, startDate] = collisionWatchValues;
+    const hasRoute = Boolean(String(routeOrigin || "").trim()) && Boolean(String(routeDestination || "").trim());
+    const shouldRunCollision = Boolean(moving) && hasRoute && Boolean(startDate);
+
+    if (!moving) {
+      setRouteCollision(null);
+      setIsCollisionLoading(false);
+      return undefined;
+    }
+
+    if (!shouldRunCollision) {
+      setRouteCollision({
+        collisionStatus: "INPUT_REQUIRED",
+        recommendations: ["Provide route origin, destination, and start date to run 4D collision checks."],
+      });
+      setIsCollisionLoading(false);
+      return undefined;
+    }
+
+    let isCancelled = false;
+    const timerId = setTimeout(async () => {
+      setIsCollisionLoading(true);
+      try {
+        const collisionResult = await applicationService.checkRouteCollision(methods.getValues());
+        if (!isCancelled) {
+          setRouteCollision(collisionResult);
+          if (collisionResult?.recommendedRouteId && !methods.getValues("preferredRouteId")) {
+            methods.setValue("preferredRouteId", collisionResult.recommendedRouteId, {
+              shouldDirty: true,
+              shouldValidate: false,
+            });
+          }
+        }
+      } finally {
+        if (!isCancelled) {
+          setIsCollisionLoading(false);
+        }
+      }
+    }, 1100);
+
+    return () => {
+      isCancelled = true;
+      clearTimeout(timerId);
+    };
+  }, [currentStep, methods, ...collisionWatchValues]);
 
   const isDocumentRequired = (documentKey) => {
     switch (documentKey) {
@@ -114,16 +238,17 @@ const MultiStepForm = () => {
     });
   };
 
-  const handleMapLocationSelect = ({ lat, lng, url }) => {
-    methods.setValue("mapLatitude", String(lat), { shouldDirty: true, shouldValidate: false });
-    methods.setValue("mapLongitude", String(lng), { shouldDirty: true, shouldValidate: false });
-    methods.setValue("mapLocationUrl", url, { shouldDirty: true, shouldValidate: false });
+  const handleMapLocationSelect = ({ lat, lng, address }) => {
+    updateMapLocation({ lat, lng, address });
   };
 
   const handleNext = async () => {
     setDocumentError("");
 
     let fieldsToValidate = STEP_VALIDATION_FIELDS[currentStep] || [];
+    if (currentStep === 4 && isMovingProcession) {
+      fieldsToValidate = [...new Set([...fieldsToValidate, "routeOrigin", "routeDestination"])];
+    }
     if (currentStep === 5 && isLargeEvent) {
       fieldsToValidate = ["wasteDisposalPlan", "cleaningContractor", "numberOfDustbins"];
     }
@@ -141,12 +266,20 @@ const MultiStepForm = () => {
         setDocumentError("Please upload all required documents to continue.");
         return;
       }
+
+      setIsRiskLoading(true);
+      try {
+        const riskResult = await applicationService.calculateRisk(methods.getValues());
+        setRiskAnalysis(riskResult);
+      } finally {
+        setIsRiskLoading(false);
+      }
     }
 
     nextStep();
   };
 
-  const submitWizard = methods.handleSubmit((values) => {
+  const submitWizard = methods.handleSubmit(async (values) => {
     const requiredDocumentKeys = getRequiredDocumentKeys();
     const allRequiredPresent = requiredDocumentKeys.every((key) => Boolean(uploadedDocuments[key]?.name));
     if (!allRequiredPresent) {
@@ -155,19 +288,25 @@ const MultiStepForm = () => {
       return;
     }
 
+    const latestRiskResult = riskAnalysis || (await applicationService.calculateRisk(values));
+    const normalizedRiskLevel = `${String(latestRiskResult?.level || "Medium").toUpperCase()} RISK`;
+
     const generatedId = `UTTSAV-${Math.floor(2000 + Math.random() * 7000)}`;
     const departmentsRequired = determineDepartments(values);
+    const basePayload = buildSubmissionPayload(values);
 
     const payload = {
-      ...values,
-      ...formData,
+      ...basePayload,
       eventSize,
-      documents: uploadedDocuments,
       departmentsRequired,
-      riskLevel: "MEDIUM RISK",
+      riskLevel: normalizedRiskLevel,
+      aiRiskAnalysis: latestRiskResult,
+      approvalForecast: approvalPrediction,
+      routeCollisionForecast: routeCollision,
       id: generatedId,
     };
 
+    setRiskAnalysis(latestRiskResult);
     setSubmittedApplication(payload);
   });
 
@@ -450,6 +589,12 @@ const MultiStepForm = () => {
           onChange={onToggleChange("roadClosureRequired")}
         />
 
+        <ToggleSwitch
+          label="Moving Procession / Rally"
+          checked={methods.watch("isMovingProcession")}
+          onChange={onToggleChange("isMovingProcession")}
+        />
+
         <FormInput
           type="number"
           label="Parking Capacity"
@@ -475,6 +620,50 @@ const MultiStepForm = () => {
           onChange={onToggleChange("publicAnnouncementSystem")}
         />
       </div>
+
+      {isMovingProcession ? (
+        <div className="mt-6 rounded-xl border border-[#BFDBFE] bg-[#EFF6FF] p-5">
+          <h4 className="text-sm font-semibold text-[#1E3A8A]">Moving Event Route Details</h4>
+          <p className="mt-1 text-xs text-[#475569]">
+            Required for 4D spatio-temporal clash checks (route + time collisions).
+          </p>
+
+          <div className="mt-4 grid gap-4 md:grid-cols-2">
+            <FormInput
+              label="Route Origin"
+              placeholder="e.g. Siddhivinayak Temple, Dadar"
+              error={methods.formState.errors.routeOrigin?.message}
+              {...methods.register("routeOrigin", isMovingProcession ? { required: "This field is required" } : {})}
+            />
+
+            <FormInput
+              label="Route Destination"
+              placeholder="e.g. Girgaon Chowpatty"
+              error={methods.formState.errors.routeDestination?.message}
+              {...methods.register(
+                "routeDestination",
+                isMovingProcession ? { required: "This field is required" } : {}
+              )}
+            />
+
+            <FormInput
+              as="select"
+              label="Route Mode"
+              options={ROUTE_MODE_OPTIONS}
+              error={methods.formState.errors.routeMode?.message}
+              {...methods.register("routeMode")}
+            />
+
+            <div className="rounded-lg border border-[#BFDBFE] bg-white p-3">
+              <ToggleSwitch
+                label="Fetch Alternate Routes"
+                checked={methods.watch("routeAlternatives")}
+                onChange={onToggleChange("routeAlternatives")}
+              />
+            </div>
+          </div>
+        </div>
+      ) : null}
     </>
   );
 
@@ -539,6 +728,7 @@ const MultiStepForm = () => {
 
   const renderStepEight = () => {
     const summary = formData;
+    const reviewRiskLevel = String(riskAnalysis?.level || "Medium").toUpperCase();
 
     return (
       <>
@@ -604,6 +794,10 @@ const MultiStepForm = () => {
             title="Traffic"
             items={[
               { label: "Road Closure", value: summary.traffic.roadClosureRequired ? "Yes" : "No" },
+              { label: "Moving Procession", value: summary.traffic.isMovingProcession ? "Yes" : "No" },
+              { label: "Route Origin", value: summary.traffic.routeOrigin },
+              { label: "Route Destination", value: summary.traffic.routeDestination },
+              { label: "Route Mode", value: summary.traffic.routeMode },
               { label: "Parking Capacity", value: summary.traffic.parkingCapacity },
               { label: "Traffic Impact", value: summary.traffic.trafficImpact },
               { label: "PA System", value: summary.traffic.publicAnnouncementSystem ? "Yes" : "No" },
@@ -623,10 +817,204 @@ const MultiStepForm = () => {
         <div className="mt-6 rounded-xl border border-[#FDE68A] bg-[#FFFBEB] p-5">
           <p className="text-xs uppercase tracking-wide text-[#92400E]">Risk Level</p>
           <span className="mt-1 inline-flex rounded-full border border-[#FCD34D] bg-[#FEF3C7] px-3 py-1 text-xs font-semibold text-[#B45309]">
-            MEDIUM RISK
+            {reviewRiskLevel} RISK
           </span>
+          <p className="mt-3 text-sm text-[#92400E]">
+            {riskAnalysis?.aiRecommendation || "AI recommendation will appear after risk analysis."}
+          </p>
+          {riskAnalysis?.confidence !== null && riskAnalysis?.confidence !== undefined ? (
+            <p className="mt-1 text-xs font-medium text-[#B45309]">
+              Confidence: {riskAnalysis.confidence}%
+            </p>
+          ) : null}
         </div>
       </>
+    );
+  };
+
+  const renderApprovalForecastPanel = () => {
+    const probability = approvalPrediction?.probability;
+    const hasForecast = typeof probability === "number";
+    const bandLabel = approvalPrediction?.bandLabel || "Awaiting Forecast";
+    const nearbyCount = approvalPrediction?.summary?.nearby_events;
+    const concurrentCount = approvalPrediction?.summary?.concurrent_events;
+    const historyCount = approvalPrediction?.summary?.history_events_considered;
+
+    return (
+      <section className="mt-6 rounded-xl border border-[#BFDBFE] bg-[#EFF6FF] p-4">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <h4 className="text-sm font-semibold text-[#1E3A8A]">Approval Probability Forecast</h4>
+            <p className="text-xs text-[#475569]">
+              Spatial-temporal estimate based on event profile and historical patterns.
+            </p>
+          </div>
+          {isApprovalLoading ? (
+            <span className="rounded-full bg-white px-3 py-1 text-xs font-medium text-[#1D4ED8]">
+              Forecasting...
+            </span>
+          ) : hasForecast ? (
+            <span className="rounded-full bg-white px-3 py-1 text-xs font-semibold text-[#1E40AF]">
+              {bandLabel}
+            </span>
+          ) : null}
+        </div>
+
+        {hasForecast ? (
+          <>
+            <div className="mt-3 grid gap-3 md:grid-cols-3">
+              <div className="rounded-lg border border-[#BFDBFE] bg-white p-3">
+                <p className="text-xs uppercase tracking-wide text-[#64748B]">Approval Chance</p>
+                <p className="mt-1 text-lg font-semibold text-[#0F172A]">{probability.toFixed(1)}%</p>
+              </div>
+              <div className="rounded-lg border border-[#BFDBFE] bg-white p-3">
+                <p className="text-xs uppercase tracking-wide text-[#64748B]">Nearby Concurrent Events</p>
+                <p className="mt-1 text-lg font-semibold text-[#0F172A]">
+                  {typeof nearbyCount === "number" ? nearbyCount : "-"}
+                </p>
+              </div>
+              <div className="rounded-lg border border-[#BFDBFE] bg-white p-3">
+                <p className="text-xs uppercase tracking-wide text-[#64748B]">Time-Overlap Events</p>
+                <p className="mt-1 text-lg font-semibold text-[#0F172A]">
+                  {typeof concurrentCount === "number" ? concurrentCount : "-"}
+                </p>
+              </div>
+            </div>
+
+            <div className="mt-3 space-y-2">
+              {Array.isArray(approvalPrediction?.recommendations) &&
+              approvalPrediction.recommendations.length > 0 ? (
+                approvalPrediction.recommendations.slice(0, 2).map((tip) => (
+                  <p key={tip} className="text-sm text-[#1E3A8A]">
+                    - {tip}
+                  </p>
+                ))
+              ) : (
+                <p className="text-sm text-[#1E3A8A]">
+                  - Keep all mandatory documents complete for faster review.
+                </p>
+              )}
+            </div>
+
+            <p className="mt-3 text-[11px] text-[#64748B]">
+              History events used: {typeof historyCount === "number" ? historyCount : 0} | Model:{" "}
+              {approvalPrediction?.modelVersion || "unknown"}
+            </p>
+          </>
+        ) : (
+          <p className="mt-3 text-sm text-[#1E3A8A]">
+            Fill event type, crowd size, and schedule to get a live approval forecast.
+          </p>
+        )}
+      </section>
+    );
+  };
+
+  const renderCollisionPanel = () => {
+    if (!isMovingProcession) return null;
+
+    const collisionStatus = String(routeCollision?.collisionStatus || "INPUT_REQUIRED").toUpperCase();
+    const routeOptions = Array.isArray(routeCollision?.routeOptions) ? routeCollision.routeOptions : [];
+    const warnings = Array.isArray(routeCollision?.warnings) ? routeCollision.warnings : [];
+    const recommendations = Array.isArray(routeCollision?.recommendations)
+      ? routeCollision.recommendations
+      : [];
+
+    const statusTextByKey = {
+      SAFE: "Safe Route",
+      WARNING: "Warning",
+      SEVERE_WARNING: "Severe Warning",
+      INPUT_REQUIRED: "Input Required",
+      NOT_APPLICABLE: "Not Applicable",
+      SERVICE_UNAVAILABLE: "Service Unavailable",
+    };
+
+    const statusClassByKey = {
+      SAFE: "border-[#86EFAC] bg-[#F0FDF4] text-[#166534]",
+      WARNING: "border-[#FDE68A] bg-[#FFFBEB] text-[#92400E]",
+      SEVERE_WARNING: "border-[#FECACA] bg-[#FEF2F2] text-[#B91C1C]",
+      INPUT_REQUIRED: "border-[#BFDBFE] bg-[#EFF6FF] text-[#1E3A8A]",
+      NOT_APPLICABLE: "border-[#E5E7EB] bg-[#F8FAFC] text-[#334155]",
+      SERVICE_UNAVAILABLE: "border-[#E5E7EB] bg-[#F8FAFC] text-[#334155]",
+    };
+
+    return (
+      <section className="mt-6 rounded-xl border border-[#BFDBFE] bg-[#F8FAFC] p-4">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <h4 className="text-sm font-semibold text-[#1E3A8A]">4D Route Collision Check</h4>
+            <p className="text-xs text-[#475569]">
+              Live route-time clash detection for moving processions and rallies.
+            </p>
+          </div>
+          <span
+            className={`rounded-full border px-3 py-1 text-xs font-semibold ${
+              statusClassByKey[collisionStatus] || statusClassByKey.INPUT_REQUIRED
+            }`}
+          >
+            {isCollisionLoading ? "Analyzing..." : statusTextByKey[collisionStatus] || collisionStatus}
+          </span>
+        </div>
+
+        {routeOptions.length > 0 ? (
+          <div className="mt-3 grid gap-3 md:grid-cols-2">
+            {routeOptions.map((route) => {
+              const routeId = route.route_id || "";
+              const isSelected = routeId && routeId === (preferredRouteId || routeCollision?.selectedRoute?.route_id);
+              const collision = route.collision || {};
+              return (
+                <button
+                  key={routeId || route.summary}
+                  type="button"
+                  onClick={() =>
+                    methods.setValue("preferredRouteId", routeId, { shouldDirty: true, shouldValidate: false })
+                  }
+                  className={`rounded-lg border bg-white p-3 text-left transition ${
+                    isSelected ? "border-[#1D4ED8] shadow-sm" : "border-[#BFDBFE] hover:border-[#60A5FA]"
+                  }`}
+                >
+                  <p className="text-sm font-semibold text-[#0F172A]">{route.summary || routeId}</p>
+                  <p className="mt-1 text-xs text-[#475569]">
+                    {route.total_distance || "-"} | {route.total_duration || "-"}
+                  </p>
+                  <p className="mt-2 text-xs font-medium text-[#1E3A8A]">
+                    Score: {typeof collision.score === "number" ? collision.score.toFixed(2) : "0.00"} | Conflicts:{" "}
+                    {collision.conflict_count ?? 0}
+                  </p>
+                </button>
+              );
+            })}
+          </div>
+        ) : null}
+
+        {warnings.length > 0 ? (
+          <div className="mt-3 space-y-2">
+            {warnings.slice(0, 2).map((warning, index) => (
+              <p key={`${warning.existing_event_id || "evt"}-${index}`} className="text-sm text-[#92400E]">
+                - {warning.severity}: {warning.existing_event_name} within{" "}
+                {typeof warning.distance_meters === "number"
+                  ? `${warning.distance_meters.toFixed(0)}m`
+                  : "nearby range"}
+                .
+              </p>
+            ))}
+          </div>
+        ) : null}
+
+        {recommendations.length > 0 ? (
+          <div className="mt-3 space-y-1">
+            {recommendations.slice(0, 2).map((item) => (
+              <p key={item} className="text-sm text-[#1E3A8A]">
+                - {item}
+              </p>
+            ))}
+          </div>
+        ) : (
+          <p className="mt-3 text-sm text-[#1E3A8A]">
+            Provide route origin and destination to evaluate clash risk for this moving event.
+          </p>
+        )}
+      </section>
     );
   };
 
@@ -660,6 +1048,13 @@ const MultiStepForm = () => {
       <section className="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
         <form onSubmit={submitWizard}>
           {renderCurrentStep()}
+          {renderApprovalForecastPanel()}
+          {renderCollisionPanel()}
+          <ComplianceAssistant
+            currentStep={currentStep}
+            stepName={steps[currentStep]}
+            formContext={methods.getValues()}
+          />
 
           <div className="mt-8 flex items-center justify-between border-t border-gray-200 pt-5">
             <button
@@ -682,9 +1077,10 @@ const MultiStepForm = () => {
               <button
                 type="button"
                 onClick={handleNext}
-                className="rounded-lg bg-[#1E40AF] px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-[#1D4ED8]"
+                disabled={isRiskLoading}
+                className="rounded-lg bg-[#1E40AF] px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-[#1D4ED8] disabled:cursor-not-allowed disabled:opacity-70"
               >
-                Next
+                {currentStep === 6 && isRiskLoading ? "Analyzing Risk..." : "Next"}
               </button>
             )}
           </div>

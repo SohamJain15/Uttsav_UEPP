@@ -28,6 +28,12 @@ const DEFAULT_VALUES = {
   firstAidTeam: false,
   ambulanceRequired: false,
   roadClosureRequired: false,
+  isMovingProcession: false,
+  routeOrigin: "",
+  routeDestination: "",
+  preferredRouteId: "",
+  routeMode: "walking",
+  routeAlternatives: true,
   parkingCapacity: "",
   trafficImpact: "Low",
   publicAnnouncementSystem: false,
@@ -75,6 +81,7 @@ export const determineDepartments = (eventData = {}) => {
   }
 
   if (
+    eventData.isMovingProcession ||
     eventData.roadClosureRequired ||
     crowd > 500 ||
     venueType === "Street / Road" ||
@@ -85,10 +92,25 @@ export const determineDepartments = (eventData = {}) => {
   }
 
   if (venueType === "Public Ground" || eventData.foodStalls) {
-    departments.add("Municipality");
+      departments.add("Municipality");
+  }
+
+  if (eventData.isMovingProcession) {
+    departments.add("Police");
   }
 
   return Array.from(departments);
+};
+
+const normalizeCoordinate = (value) => {
+  const parsedValue = Number(value);
+  if (!Number.isFinite(parsedValue)) return "";
+  return String(parsedValue);
+};
+
+const createMapLocationUrl = (latitude, longitude) => {
+  if (latitude === "" || latitude == null || longitude === "" || longitude == null) return "";
+  return `https://www.google.com/maps?q=${latitude},${longitude}`;
 };
 
 const createSharedFormData = (values = {}, documents = {}) => ({
@@ -127,6 +149,13 @@ const createSharedFormData = (values = {}, documents = {}) => ({
   },
   traffic: {
     roadClosureRequired: Boolean(values.roadClosureRequired),
+    isMovingProcession: Boolean(values.isMovingProcession),
+    routeOrigin: values.routeOrigin || "",
+    routeDestination: values.routeDestination || "",
+    preferredRouteId: values.preferredRouteId || "",
+    routeMode: values.routeMode || "walking",
+    routeAlternatives:
+      values.routeAlternatives === undefined ? true : Boolean(values.routeAlternatives),
     parkingCapacity: values.parkingCapacity || "",
     trafficImpact: values.trafficImpact || "",
     publicAnnouncementSystem: Boolean(values.publicAnnouncementSystem),
@@ -137,6 +166,9 @@ const createSharedFormData = (values = {}, documents = {}) => ({
     numberOfDustbins: values.numberOfDustbins || "",
   },
   documents,
+  address: values.address || "",
+  mapLatitude: values.mapLatitude || "",
+  mapLongitude: values.mapLongitude || "",
   mapLocationUrl: values.mapLocationUrl || "",
 });
 
@@ -188,6 +220,36 @@ export const useApplicationForm = () => {
     }));
   };
 
+  const updateMapLocation = ({ lat, lng, address }) => {
+    const latitude = normalizeCoordinate(lat);
+    const longitude = normalizeCoordinate(lng);
+    const formattedAddress = typeof address === "string" ? address.trim() : "";
+
+    methods.setValue("mapLatitude", latitude, { shouldDirty: true, shouldValidate: false });
+    methods.setValue("mapLongitude", longitude, { shouldDirty: true, shouldValidate: false });
+    methods.setValue("mapLocationUrl", createMapLocationUrl(latitude, longitude), {
+      shouldDirty: true,
+      shouldValidate: false,
+    });
+
+    if (formattedAddress) {
+      methods.setValue("address", formattedAddress, { shouldDirty: true, shouldValidate: false });
+    }
+  };
+
+  const buildSubmissionPayload = (values = methods.getValues()) => {
+    const sharedFormData = createSharedFormData(values, uploadedDocumentsRef.current);
+
+    return {
+      ...values,
+      ...sharedFormData,
+      address: sharedFormData.address,
+      mapLatitude: sharedFormData.mapLatitude,
+      mapLongitude: sharedFormData.mapLongitude,
+      documents: uploadedDocumentsRef.current,
+    };
+  };
+
   return {
     methods,
     currentStep,
@@ -201,5 +263,7 @@ export const useApplicationForm = () => {
     uploadedDocuments,
     formData,
     setDocument,
+    updateMapLocation,
+    buildSubmissionPayload,
   };
 };
