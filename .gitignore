@@ -1,0 +1,54 @@
+# --- OS / Editor ---
+.DS_Store
+Thumbs.db
+Desktop.ini
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# --- Logs ---
+*.log
+logs/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# --- Environment / local config ---
+.env
+.env.*
+!.env.example
+
+# --- Node / Vite / React ---
+node_modules/
+dist/
+build/
+.vite/
+coverage/
+*.tsbuildinfo
+
+# --- Python (backend tooling, if used) ---
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.venv/
+venv/
+
+# --- Runtime / temp files ---
+tmp/
+temp/
+*.tmp
+
+# --- Project-specific local artifacts ---
+user-portal/dev-server.log
+user-portal/dev-server.err.log
+
+
+user-portal/node_modules/
+user-portal/dist/
+user-portal/build/
+user-portal/.vite/
+user-portal/coverage/
+user-portal/user-portal.tsbuildinfo
