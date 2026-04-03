@@ -1,9 +1,10 @@
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { CheckCircle2, FileText, MapPin, ShieldCheck, Users } from "lucide-react";
+import { CheckCircle2 } from "lucide-react";
 import DepartmentBadge from "./DepartmentBadge";
 import FileUploadCard from "./FileUploadCard";
 import FormInput from "./FormInput";
+import GoogleMapPicker from "./GoogleMapPicker";
 import ProgressStepper from "./ProgressStepper";
 import ReviewCard from "./ReviewCard";
 import ToggleSwitch from "./ToggleSwitch";
@@ -40,11 +41,12 @@ const TRAFFIC_OPTIONS = [
 ];
 
 const DOCUMENT_FIELDS = [
-  { key: "organizerIdProof", title: "Organizer ID Proof", required: true },
-  { key: "venueOwnerConsent", title: "Venue Owner Consent", required: false },
-  { key: "eventLayoutPlan", title: "Event Layout Plan", required: true },
-  { key: "safetyPlan", title: "Safety Plan", required: true },
-  { key: "insuranceCertificate", title: "Insurance Certificate", required: true },
+  { key: "organizerIdProof", title: "Organizer ID Proof" },
+  { key: "venueOwnerConsent", title: "Venue Owner Consent" },
+  { key: "crowdManagementPlan", title: "Crowd Management Plan" },
+  { key: "eventLayoutPlan", title: "Event Layout Plan" },
+  { key: "safetyPlan", title: "Safety Plan" },
+  { key: "insuranceCertificate", title: "Insurance Certificate" },
 ];
 
 const STEP_VALIDATION_FIELDS = {
@@ -52,7 +54,6 @@ const STEP_VALIDATION_FIELDS = {
   1: ["venueName", "venueType", "address", "city", "wardNumber", "venueOwnership"],
   3: ["securityPersonnelCount"],
   4: ["parkingCapacity", "trafficImpact"],
-  5: ["wasteDisposalPlan", "cleaningContractor", "numberOfDustbins"],
 };
 
 const StepHeader = ({ title, subtitle }) => (
@@ -74,21 +75,36 @@ const MultiStepForm = () => {
     isLastStep,
     nextStep,
     prevStep,
+    goToStep,
     eventSize,
     uploadedDocuments,
     setDocument,
+    formData,
   } = useApplicationForm();
 
-  const formValues = methods.watch();
   const venueOwnership = methods.watch("venueOwnership");
+  const selectedMapLatitude = methods.watch("mapLatitude");
+  const selectedMapLongitude = methods.watch("mapLongitude");
+  const crowdSize = Number(methods.watch("crowdSize") || 0);
+  const isLargeEvent = eventSize === "LARGE";
 
-  const departmentsRequired = useMemo(() => determineDepartments(formValues), [formValues]);
+  const isDocumentRequired = (documentKey) => {
+    switch (documentKey) {
+      case "organizerIdProof":
+        return true;
+      case "venueOwnerConsent":
+        return venueOwnership === "Venue Booking";
+      case "crowdManagementPlan":
+        return crowdSize > 500;
+      case "insuranceCertificate":
+        return isLargeEvent;
+      default:
+        return false;
+    }
+  };
 
-  const renderEventSizeBadge = () => (
-    <span className="inline-flex items-center rounded-full border border-[#FCD34D] bg-[#FFFBEB] px-3 py-1 text-xs font-semibold text-[#B45309]">
-      Event Size: {eventSize}
-    </span>
-  );
+  const getRequiredDocumentKeys = () =>
+    DOCUMENT_FIELDS.filter((field) => isDocumentRequired(field.key)).map((field) => field.key);
 
   const onToggleChange = (fieldName) => (event) => {
     methods.setValue(fieldName, event.target.checked, {
@@ -98,21 +114,29 @@ const MultiStepForm = () => {
     });
   };
 
+  const handleMapLocationSelect = ({ lat, lng, url }) => {
+    methods.setValue("mapLatitude", String(lat), { shouldDirty: true, shouldValidate: false });
+    methods.setValue("mapLongitude", String(lng), { shouldDirty: true, shouldValidate: false });
+    methods.setValue("mapLocationUrl", url, { shouldDirty: true, shouldValidate: false });
+  };
+
   const handleNext = async () => {
     setDocumentError("");
 
-    const fieldsToValidate = STEP_VALIDATION_FIELDS[currentStep] || [];
+    let fieldsToValidate = STEP_VALIDATION_FIELDS[currentStep] || [];
+    if (currentStep === 5 && isLargeEvent) {
+      fieldsToValidate = ["wasteDisposalPlan", "cleaningContractor", "numberOfDustbins"];
+    }
+
     if (fieldsToValidate.length > 0) {
       const valid = await methods.trigger(fieldsToValidate);
       if (!valid) return;
     }
 
     if (currentStep === 6) {
-      const requiredDocumentKeys = DOCUMENT_FIELDS.filter(
-        (field) => field.required || (field.key === "venueOwnerConsent" && venueOwnership === "Venue Booking")
-      ).map((field) => field.key);
+      const requiredDocumentKeys = getRequiredDocumentKeys();
 
-      const allPresent = requiredDocumentKeys.every((key) => Boolean(uploadedDocuments[key]));
+      const allPresent = requiredDocumentKeys.every((key) => Boolean(uploadedDocuments[key]?.name));
       if (!allPresent) {
         setDocumentError("Please upload all required documents to continue.");
         return;
@@ -123,9 +147,20 @@ const MultiStepForm = () => {
   };
 
   const submitWizard = methods.handleSubmit((values) => {
+    const requiredDocumentKeys = getRequiredDocumentKeys();
+    const allRequiredPresent = requiredDocumentKeys.every((key) => Boolean(uploadedDocuments[key]?.name));
+    if (!allRequiredPresent) {
+      setDocumentError("Please upload all required documents before submission.");
+      goToStep(6);
+      return;
+    }
+
     const generatedId = `UTTSAV-${Math.floor(2000 + Math.random() * 7000)}`;
+    const departmentsRequired = determineDepartments(values);
+
     const payload = {
       ...values,
+      ...formData,
       eventSize,
       documents: uploadedDocuments,
       departmentsRequired,
@@ -191,7 +226,7 @@ const MultiStepForm = () => {
           placeholder="Enter event name"
           error={methods.formState.errors.eventName?.message}
           helperText="Use the official event title."
-          {...methods.register("eventName", { required: "Event name is required." })}
+          {...methods.register("eventName", { required: "This field is required" })}
         />
 
         <FormInput
@@ -199,7 +234,7 @@ const MultiStepForm = () => {
           label="Event Type"
           options={EVENT_TYPE_OPTIONS}
           error={methods.formState.errors.eventType?.message}
-          {...methods.register("eventType", { required: "Event type is required." })}
+          {...methods.register("eventType", { required: "This field is required" })}
         />
 
         <div>
@@ -209,13 +244,15 @@ const MultiStepForm = () => {
             min={1}
             placeholder="Enter expected attendees"
             error={methods.formState.errors.crowdSize?.message}
-            helperText="Used for event-size and department routing."
+            helperText="Used for event-size and approval routing."
             {...methods.register("crowdSize", {
-              required: "Expected crowd is required.",
-              min: { value: 1, message: "Crowd size must be at least 1." },
+              required: "This field is required",
+              min: { value: 1, message: "This field is required" },
             })}
           />
-          <div className="mt-2">{renderEventSizeBadge()}</div>
+          <div className="mt-2 inline-flex items-center rounded-full border border-[#FCD34D] bg-[#FFFBEB] px-3 py-1 text-xs font-semibold text-[#B45309]">
+            Event Size: {eventSize}
+          </div>
         </div>
 
         <div className="grid grid-cols-2 gap-4">
@@ -223,13 +260,13 @@ const MultiStepForm = () => {
             type="date"
             label="Start Date"
             error={methods.formState.errors.startDate?.message}
-            {...methods.register("startDate", { required: "Start date is required." })}
+            {...methods.register("startDate", { required: "This field is required" })}
           />
           <FormInput
             type="date"
             label="End Date"
             error={methods.formState.errors.endDate?.message}
-            {...methods.register("endDate", { required: "End date is required." })}
+            {...methods.register("endDate", { required: "This field is required" })}
           />
         </div>
 
@@ -237,14 +274,14 @@ const MultiStepForm = () => {
           type="time"
           label="Start Time"
           error={methods.formState.errors.startTime?.message}
-          {...methods.register("startTime", { required: "Start time is required." })}
+          {...methods.register("startTime", { required: "This field is required" })}
         />
 
         <FormInput
           type="time"
           label="End Time"
           error={methods.formState.errors.endTime?.message}
-          {...methods.register("endTime", { required: "End time is required." })}
+          {...methods.register("endTime", { required: "This field is required" })}
         />
       </div>
     </>
@@ -258,7 +295,7 @@ const MultiStepForm = () => {
           label="Venue Name"
           placeholder="Enter venue name"
           error={methods.formState.errors.venueName?.message}
-          {...methods.register("venueName", { required: "Venue name is required." })}
+          {...methods.register("venueName", { required: "This field is required" })}
         />
 
         <FormInput
@@ -266,28 +303,28 @@ const MultiStepForm = () => {
           label="Venue Type"
           options={VENUE_TYPE_OPTIONS}
           error={methods.formState.errors.venueType?.message}
-          {...methods.register("venueType", { required: "Venue type is required." })}
+          {...methods.register("venueType", { required: "This field is required" })}
         />
 
         <FormInput
           label="Address"
           placeholder="Enter complete venue address"
           error={methods.formState.errors.address?.message}
-          {...methods.register("address", { required: "Address is required." })}
+          {...methods.register("address", { required: "This field is required" })}
         />
 
         <FormInput
           label="City"
           placeholder="Enter city"
           error={methods.formState.errors.city?.message}
-          {...methods.register("city", { required: "City is required." })}
+          {...methods.register("city", { required: "This field is required" })}
         />
 
         <FormInput
           label="Ward Number"
           placeholder="Enter ward number"
           error={methods.formState.errors.wardNumber?.message}
-          {...methods.register("wardNumber", { required: "Ward number is required." })}
+          {...methods.register("wardNumber", { required: "This field is required" })}
         />
 
         <FormInput
@@ -295,13 +332,16 @@ const MultiStepForm = () => {
           label="Venue Ownership"
           options={OWNERSHIP_OPTIONS}
           error={methods.formState.errors.venueOwnership?.message}
-          {...methods.register("venueOwnership", { required: "Venue ownership is required." })}
+          {...methods.register("venueOwnership", { required: "This field is required" })}
         />
       </div>
 
-      <div className="mt-6 rounded-xl border border-gray-200 bg-[#F8FAFC] p-5 text-center">
-        <MapPin className="mx-auto text-[#64748B]" size={20} />
-        <p className="mt-2 text-sm font-medium text-[#0F172A]">Map Location Selector (Coming Soon)</p>
+      <div className="mt-6">
+        <GoogleMapPicker
+          latitude={selectedMapLatitude}
+          longitude={selectedMapLongitude}
+          onLocationSelect={handleMapLocationSelect}
+        />
       </div>
 
       {venueOwnership === "Venue Booking" ? (
@@ -312,7 +352,8 @@ const MultiStepForm = () => {
             <FileUploadCard
               title="Venue Owner Consent"
               required
-              onFileSelected={(name) => setDocument("venueOwnerConsent", name)}
+              uploadedFile={uploadedDocuments.venueOwnerConsent}
+              onFileSelected={(name, file) => setDocument("venueOwnerConsent", name, file)}
             />
           </div>
         </div>
@@ -363,8 +404,8 @@ const MultiStepForm = () => {
           min={0}
           error={methods.formState.errors.securityPersonnelCount?.message}
           {...methods.register("securityPersonnelCount", {
-            required: "Security personnel count is required.",
-            min: { value: 0, message: "Value cannot be negative." },
+            required: "This field is required",
+            min: { value: 0, message: "This field is required" },
           })}
         />
 
@@ -390,8 +431,10 @@ const MultiStepForm = () => {
       <div className="mt-6">
         <FileUploadCard
           title="Crowd Management Plan"
-          helperText="Optional upload"
-          onFileSelected={(name) => setDocument("crowdManagementPlan", name)}
+          required={isDocumentRequired("crowdManagementPlan")}
+          helperText={isDocumentRequired("crowdManagementPlan") ? "Required for crowd above 500" : "Optional upload"}
+          uploadedFile={uploadedDocuments.crowdManagementPlan}
+          onFileSelected={(name, file) => setDocument("crowdManagementPlan", name, file)}
         />
       </div>
     </>
@@ -413,8 +456,8 @@ const MultiStepForm = () => {
           min={0}
           error={methods.formState.errors.parkingCapacity?.message}
           {...methods.register("parkingCapacity", {
-            required: "Parking capacity is required.",
-            min: { value: 0, message: "Value cannot be negative." },
+            required: "This field is required",
+            min: { value: 0, message: "This field is required" },
           })}
         />
 
@@ -423,7 +466,7 @@ const MultiStepForm = () => {
           label="Expected Traffic Impact"
           options={TRAFFIC_OPTIONS}
           error={methods.formState.errors.trafficImpact?.message}
-          {...methods.register("trafficImpact", { required: "Traffic impact is required." })}
+          {...methods.register("trafficImpact", { required: "This field is required" })}
         />
 
         <ToggleSwitch
@@ -435,38 +478,46 @@ const MultiStepForm = () => {
     </>
   );
 
-  const renderStepSix = () => (
-    <>
-      <StepHeader title="Waste Management" subtitle="Capture sanitation and cleanup commitments." />
-      <div className="grid gap-6 md:grid-cols-2">
-        <FormInput
-          as="textarea"
-          rows={4}
-          label="Waste Disposal Plan"
-          error={methods.formState.errors.wasteDisposalPlan?.message}
-          {...methods.register("wasteDisposalPlan", { required: "Waste disposal plan is required." })}
-        />
+  const renderStepSix = () => {
+    const wasteRule = isLargeEvent ? { required: "This field is required" } : {};
 
-        <FormInput
-          label="Cleaning Contractor"
-          placeholder="Enter contractor name"
-          error={methods.formState.errors.cleaningContractor?.message}
-          {...methods.register("cleaningContractor", { required: "Cleaning contractor is required." })}
-        />
+    return (
+      <>
+        <StepHeader title="Waste Management" subtitle="Capture sanitation and cleanup commitments." />
+        <p className="mb-4 text-xs font-semibold uppercase tracking-wide text-[#64748B]">
+          {isLargeEvent ? "Required for large events" : "Optional for small and medium events"}
+        </p>
 
-        <FormInput
-          type="number"
-          min={0}
-          label="Number of Dustbins"
-          error={methods.formState.errors.numberOfDustbins?.message}
-          {...methods.register("numberOfDustbins", {
-            required: "Number of dustbins is required.",
-            min: { value: 0, message: "Value cannot be negative." },
-          })}
-        />
-      </div>
-    </>
-  );
+        <div className="grid gap-6 md:grid-cols-2">
+          <FormInput
+            as="textarea"
+            rows={4}
+            label="Waste Disposal Plan"
+            error={methods.formState.errors.wasteDisposalPlan?.message}
+            {...methods.register("wasteDisposalPlan", wasteRule)}
+          />
+
+          <FormInput
+            label="Cleaning Contractor"
+            placeholder="Enter contractor name"
+            error={methods.formState.errors.cleaningContractor?.message}
+            {...methods.register("cleaningContractor", wasteRule)}
+          />
+
+          <FormInput
+            type="number"
+            min={0}
+            label="Number of Dustbins"
+            error={methods.formState.errors.numberOfDustbins?.message}
+            {...methods.register("numberOfDustbins", {
+              ...wasteRule,
+              validate: (value) => !value || Number(value) >= 0 || "This field is required",
+            })}
+          />
+        </div>
+      </>
+    );
+  };
 
   const renderStepSeven = () => (
     <>
@@ -476,8 +527,9 @@ const MultiStepForm = () => {
           <FileUploadCard
             key={field.key}
             title={field.title}
-            required={field.required || (field.key === "venueOwnerConsent" && venueOwnership === "Venue Booking")}
-            onFileSelected={(name) => setDocument(field.key, name)}
+            required={isDocumentRequired(field.key)}
+            uploadedFile={uploadedDocuments[field.key]}
+            onFileSelected={(name, file) => setDocument(field.key, name, file)}
           />
         ))}
       </div>
@@ -486,7 +538,7 @@ const MultiStepForm = () => {
   );
 
   const renderStepEight = () => {
-    const summary = methods.getValues();
+    const summary = formData;
 
     return (
       <>
@@ -496,89 +548,83 @@ const MultiStepForm = () => {
           <ReviewCard
             title="Event Details"
             items={[
-              { label: "Event Name", value: summary.eventName },
-              { label: "Event Type", value: summary.eventType },
-              { label: "Expected Crowd", value: summary.crowdSize },
+              { label: "Event Name", value: summary.eventDetails.eventName },
+              { label: "Event Type", value: summary.eventDetails.eventType },
+              { label: "Expected Crowd", value: summary.eventDetails.crowdSize },
               { label: "Event Size", value: eventSize },
-              { label: "Start", value: `${summary.startDate || "-"} ${summary.startTime || ""}`.trim() },
-              { label: "End", value: `${summary.endDate || "-"} ${summary.endTime || ""}`.trim() },
+              {
+                label: "Start",
+                value: `${summary.eventDetails.startDate || "-"} ${summary.eventDetails.startTime || ""}`.trim(),
+              },
+              {
+                label: "End",
+                value: `${summary.eventDetails.endDate || "-"} ${summary.eventDetails.endTime || ""}`.trim(),
+              },
             ]}
           />
 
           <ReviewCard
             title="Venue Details"
             items={[
-              { label: "Venue Name", value: summary.venueName },
-              { label: "Venue Type", value: summary.venueType },
-              { label: "Address", value: summary.address },
-              { label: "City", value: summary.city },
-              { label: "Ward Number", value: summary.wardNumber },
-              { label: "Venue Ownership", value: summary.venueOwnership },
+              { label: "Venue Name", value: summary.venueDetails.venueName },
+              { label: "Venue Type", value: summary.venueDetails.venueType },
+              { label: "Address", value: summary.venueDetails.address },
+              { label: "City", value: summary.venueDetails.city },
+              { label: "Ward Number", value: summary.venueDetails.wardNumber },
+              { label: "Venue Ownership", value: summary.venueDetails.venueOwnership },
+              { label: "Map URL", value: summary.venueDetails.mapLocationUrl },
             ]}
           />
 
           <ReviewCard
             title="Infrastructure"
             items={[
-              { label: "Stage Required", value: summary.stageRequired ? "Yes" : "No" },
-              { label: "Sound System", value: summary.soundSystem ? "Yes" : "No" },
-              { label: "Temporary Structures", value: summary.temporaryStructures ? "Yes" : "No" },
-              { label: "Food Stalls", value: summary.foodStalls ? "Yes" : "No" },
-              { label: "Fireworks", value: summary.fireworks ? "Yes" : "No" },
+              { label: "Stage Required", value: summary.infrastructure.stageRequired ? "Yes" : "No" },
+              { label: "Sound System", value: summary.infrastructure.soundSystem ? "Yes" : "No" },
+              {
+                label: "Temporary Structures",
+                value: summary.infrastructure.temporaryStructures ? "Yes" : "No",
+              },
+              { label: "Food Stalls", value: summary.infrastructure.foodStalls ? "Yes" : "No" },
+              { label: "Fireworks", value: summary.infrastructure.fireworks ? "Yes" : "No" },
             ]}
           />
 
           <ReviewCard
             title="Safety"
             items={[
-              { label: "Security Personnel", value: summary.securityPersonnelCount },
-              { label: "Medical Facility", value: summary.medicalFacilityAvailable ? "Yes" : "No" },
-              { label: "First Aid Team", value: summary.firstAidTeam ? "Yes" : "No" },
-              { label: "Ambulance Required", value: summary.ambulanceRequired ? "Yes" : "No" },
+              { label: "Security Personnel", value: summary.safety.securityPersonnelCount },
+              { label: "Medical Facility", value: summary.safety.medicalFacilityAvailable ? "Yes" : "No" },
+              { label: "First Aid Team", value: summary.safety.firstAidTeam ? "Yes" : "No" },
+              { label: "Ambulance Required", value: summary.safety.ambulanceRequired ? "Yes" : "No" },
             ]}
           />
 
           <ReviewCard
             title="Traffic"
             items={[
-              { label: "Road Closure", value: summary.roadClosureRequired ? "Yes" : "No" },
-              { label: "Parking Capacity", value: summary.parkingCapacity },
-              { label: "Traffic Impact", value: summary.trafficImpact },
-              { label: "PA System", value: summary.publicAnnouncementSystem ? "Yes" : "No" },
+              { label: "Road Closure", value: summary.traffic.roadClosureRequired ? "Yes" : "No" },
+              { label: "Parking Capacity", value: summary.traffic.parkingCapacity },
+              { label: "Traffic Impact", value: summary.traffic.trafficImpact },
+              { label: "PA System", value: summary.traffic.publicAnnouncementSystem ? "Yes" : "No" },
             ]}
           />
 
           <ReviewCard
             title="Waste"
             items={[
-              { label: "Waste Plan", value: summary.wasteDisposalPlan },
-              { label: "Cleaning Contractor", value: summary.cleaningContractor },
-              { label: "Dustbins", value: summary.numberOfDustbins },
+              { label: "Waste Plan", value: summary.waste.wasteDisposalPlan },
+              { label: "Cleaning Contractor", value: summary.waste.cleaningContractor },
+              { label: "Dustbins", value: summary.waste.numberOfDustbins },
             ]}
           />
         </div>
 
         <div className="mt-6 rounded-xl border border-[#FDE68A] bg-[#FFFBEB] p-5">
-          <div className="flex flex-wrap items-start justify-between gap-3">
-            <div>
-              <p className="text-xs uppercase tracking-wide text-[#92400E]">Risk Level</p>
-              <span className="mt-1 inline-flex rounded-full border border-[#FCD34D] bg-[#FEF3C7] px-3 py-1 text-xs font-semibold text-[#B45309]">
-                MEDIUM RISK
-              </span>
-            </div>
-            <div className="text-right">
-              <p className="text-xs uppercase tracking-wide text-[#92400E]">Departments Required</p>
-              <div className="mt-1 flex flex-wrap justify-end gap-2">
-                {departmentsRequired.length > 0 ? (
-                  departmentsRequired.map((department) => (
-                    <DepartmentBadge key={department} label={department} variant="department" />
-                  ))
-                ) : (
-                  <span className="text-sm text-[#92400E]">No departments matched</span>
-                )}
-              </div>
-            </div>
-          </div>
+          <p className="text-xs uppercase tracking-wide text-[#92400E]">Risk Level</p>
+          <span className="mt-1 inline-flex rounded-full border border-[#FCD34D] bg-[#FEF3C7] px-3 py-1 text-xs font-semibold text-[#B45309]">
+            MEDIUM RISK
+          </span>
         </div>
       </>
     );
@@ -643,45 +689,6 @@ const MultiStepForm = () => {
             )}
           </div>
         </form>
-      </section>
-
-      <section className="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
-        <h4 className="text-base font-semibold text-[#0F172A]">Smart Routing Preview</h4>
-        <p className="mt-1 text-sm text-[#64748B]">Departments update automatically based on your current inputs.</p>
-
-        <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-          <div className="rounded-lg border border-gray-200 bg-[#F8FAFC] p-3">
-            <div className="flex items-center gap-2 text-[#1E40AF]">
-              <Users size={16} />
-              <p className="text-xs font-semibold uppercase">Event Size</p>
-            </div>
-            <p className="mt-2 text-sm font-semibold text-[#0F172A]">{eventSize}</p>
-          </div>
-
-          <div className="rounded-lg border border-gray-200 bg-[#F8FAFC] p-3">
-            <div className="flex items-center gap-2 text-[#1E40AF]">
-              <ShieldCheck size={16} />
-              <p className="text-xs font-semibold uppercase">Departments</p>
-            </div>
-            <p className="mt-2 text-sm font-semibold text-[#0F172A]">{departmentsRequired.length}</p>
-          </div>
-
-          <div className="rounded-lg border border-gray-200 bg-[#F8FAFC] p-3">
-            <div className="flex items-center gap-2 text-[#1E40AF]">
-              <FileText size={16} />
-              <p className="text-xs font-semibold uppercase">Uploaded Files</p>
-            </div>
-            <p className="mt-2 text-sm font-semibold text-[#0F172A]">{Object.keys(uploadedDocuments).length}</p>
-          </div>
-
-          <div className="rounded-lg border border-gray-200 bg-[#F8FAFC] p-3">
-            <div className="flex items-center gap-2 text-[#1E40AF]">
-              <CheckCircle2 size={16} />
-              <p className="text-xs font-semibold uppercase">Current Step</p>
-            </div>
-            <p className="mt-2 text-sm font-semibold text-[#0F172A]">{steps[currentStep]}</p>
-          </div>
-        </div>
       </section>
     </div>
   );

@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useForm } from "react-hook-form";
 
 const DEFAULT_VALUES = {
@@ -15,6 +15,9 @@ const DEFAULT_VALUES = {
   city: "",
   wardNumber: "",
   venueOwnership: "Organizer Owned",
+  mapLatitude: "",
+  mapLongitude: "",
+  mapLocationUrl: "",
   stageRequired: false,
   soundSystem: false,
   temporaryStructures: false,
@@ -88,6 +91,55 @@ export const determineDepartments = (eventData = {}) => {
   return Array.from(departments);
 };
 
+const createSharedFormData = (values = {}, documents = {}) => ({
+  eventDetails: {
+    eventName: values.eventName || "",
+    eventType: values.eventType || "",
+    crowdSize: values.crowdSize || "",
+    startDate: values.startDate || "",
+    endDate: values.endDate || "",
+    startTime: values.startTime || "",
+    endTime: values.endTime || "",
+  },
+  venueDetails: {
+    venueName: values.venueName || "",
+    venueType: values.venueType || "",
+    address: values.address || "",
+    city: values.city || "",
+    wardNumber: values.wardNumber || "",
+    venueOwnership: values.venueOwnership || "",
+    mapLatitude: values.mapLatitude || "",
+    mapLongitude: values.mapLongitude || "",
+    mapLocationUrl: values.mapLocationUrl || "",
+  },
+  infrastructure: {
+    stageRequired: Boolean(values.stageRequired),
+    soundSystem: Boolean(values.soundSystem),
+    temporaryStructures: Boolean(values.temporaryStructures),
+    foodStalls: Boolean(values.foodStalls),
+    fireworks: Boolean(values.fireworks),
+  },
+  safety: {
+    securityPersonnelCount: values.securityPersonnelCount || "",
+    medicalFacilityAvailable: Boolean(values.medicalFacilityAvailable),
+    firstAidTeam: Boolean(values.firstAidTeam),
+    ambulanceRequired: Boolean(values.ambulanceRequired),
+  },
+  traffic: {
+    roadClosureRequired: Boolean(values.roadClosureRequired),
+    parkingCapacity: values.parkingCapacity || "",
+    trafficImpact: values.trafficImpact || "",
+    publicAnnouncementSystem: Boolean(values.publicAnnouncementSystem),
+  },
+  waste: {
+    wasteDisposalPlan: values.wasteDisposalPlan || "",
+    cleaningContractor: values.cleaningContractor || "",
+    numberOfDustbins: values.numberOfDustbins || "",
+  },
+  documents,
+  mapLocationUrl: values.mapLocationUrl || "",
+});
+
 export const useApplicationForm = () => {
   const [currentStep, setCurrentStep] = useState(0);
   const [uploadedDocuments, setUploadedDocuments] = useState({});
@@ -97,6 +149,24 @@ export const useApplicationForm = () => {
     mode: "onBlur",
   });
 
+  const uploadedDocumentsRef = useRef(uploadedDocuments);
+  const [formData, setFormData] = useState(() =>
+    createSharedFormData(DEFAULT_VALUES, uploadedDocuments)
+  );
+
+  useEffect(() => {
+    uploadedDocumentsRef.current = uploadedDocuments;
+    setFormData(createSharedFormData(methods.getValues(), uploadedDocuments));
+  }, [uploadedDocuments, methods]);
+
+  useEffect(() => {
+    const subscription = methods.watch((values) => {
+      setFormData(createSharedFormData(values, uploadedDocumentsRef.current));
+    });
+
+    return () => subscription.unsubscribe();
+  }, [methods]);
+
   const crowdSize = methods.watch("crowdSize");
   const eventSize = useMemo(() => classifyEventSize(crowdSize), [crowdSize]);
 
@@ -104,10 +174,17 @@ export const useApplicationForm = () => {
   const prevStep = () => setCurrentStep((prev) => Math.max(prev - 1, 0));
   const goToStep = (stepIndex) => setCurrentStep(Math.min(Math.max(stepIndex, 0), FORM_STEPS.length - 1));
 
-  const setDocument = (key, fileName) => {
+  const setDocument = (key, fileName, fileObject) => {
+    const normalizedName =
+      typeof fileName === "string" ? fileName : fileObject?.name || fileName?.name || "";
+    const normalizedFile = fileObject || (fileName instanceof File ? fileName : null);
+
     setUploadedDocuments((prev) => ({
       ...prev,
-      [key]: fileName,
+      [key]: {
+        name: normalizedName,
+        file: normalizedFile,
+      },
     }));
   };
 
@@ -122,6 +199,7 @@ export const useApplicationForm = () => {
     goToStep,
     eventSize,
     uploadedDocuments,
+    formData,
     setDocument,
   };
 };

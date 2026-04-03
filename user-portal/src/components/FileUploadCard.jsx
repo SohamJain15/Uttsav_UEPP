@@ -7,15 +7,19 @@ const FileUploadCard = ({
   onFileSelected,
   accepted = ".pdf,.png,.jpg,.jpeg",
   helperText = "Drag and drop or click to upload",
+  uploadedFile = null,
 }) => {
   const [isDragging, setIsDragging] = useState(false);
-  const [fileName, setFileName] = useState("");
+  const [localFileName, setLocalFileName] = useState("");
 
   const handleFile = (file) => {
     if (!file) return;
-    setFileName(file.name);
+    setLocalFileName(file.name);
     onFileSelected?.(file.name, file);
   };
+
+  const uploadedFileName = uploadedFile?.name || localFileName;
+  const hasUploadedFile = Boolean(uploadedFile?.name);
 
   return (
     <div
@@ -47,12 +51,18 @@ const FileUploadCard = ({
           <p className="mt-2 text-sm text-[#0F172A]">Upload File</p>
           <p className="text-xs text-[#64748B]">{helperText}</p>
 
-          {fileName ? (
+          {uploadedFileName ? (
             <div className="mt-3 inline-flex items-center gap-2 rounded-md bg-[#ECFDF3] px-3 py-1">
               <FileText size={14} className="text-[#16A34A]" />
-              <span className="text-xs font-medium text-[#16A34A]">{fileName}</span>
+              <span className="text-xs font-medium text-[#16A34A]">
+                {hasUploadedFile ? "Already Uploaded" : "Uploaded"}: {uploadedFileName}
+              </span>
             </div>
           ) : null}
+
+          <p className="mt-3 text-xs font-semibold text-[#1E40AF]">
+            {uploadedFileName ? "Replace" : "Upload"}
+          </p>
         </div>
 
         <input
