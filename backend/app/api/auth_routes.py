@@ -5,16 +5,17 @@ from typing import Any, Dict, Optional
 from fastapi import APIRouter, Depends, HTTPException
 
 from app.core.auth import fetch_user_profile, first_row, get_current_user
-from app.core.database import SUPABASE_SERVICE_ROLE_KEY, SUPABASE_URL, db
+from app.core.database import SUPABASE_ANON_KEY, SUPABASE_SERVICE_ROLE_KEY, SUPABASE_URL, db
 from app.models.schemas import AuthRegisterRequest, UserCredentials, UserProfileUpdateRequest
 
 router = APIRouter()
 
 
 def _new_auth_client():
-    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
+    auth_key = SUPABASE_ANON_KEY or SUPABASE_SERVICE_ROLE_KEY
+    if not SUPABASE_URL or not auth_key:
         raise HTTPException(status_code=500, detail="Supabase auth client is not configured.")
-    return create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+    return create_client(SUPABASE_URL, auth_key)
 
 
 def _error_detail(exc: Exception, fallback: str) -> str:
@@ -409,7 +410,14 @@ async def login_user(credentials: UserCredentials):
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(status_code=401, detail=_error_detail(exc, "Login failed")) from exc
+        detail = _error_detail(exc, "Login failed")
+        if "Database error querying schema" in detail:
+            detail = (
+                "Authentication backend is misconfigured. Set SUPABASE_ANON_KEY in backend/.env "
+                "to your Supabase project anon key and restart the backend."
+            )
+            raise HTTPException(status_code=500, detail=detail) from exc
+        raise HTTPException(status_code=401, detail=detail) from exc
 
 
 @router.get("/api/user/profile")

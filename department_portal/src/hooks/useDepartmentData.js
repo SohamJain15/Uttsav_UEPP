@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { departmentService } from '../services/departmentService';
 
 const buildJurisdiction = (applications, role) => {
@@ -44,22 +44,32 @@ const buildPincodeDepartmentMapping = (applications) => {
 };
 
 export const useDepartmentData = (role) => {
+  const POLL_INTERVAL_MS = 30000;
   const [applications, setApplications] = useState([]);
   const [jurisdiction, setJurisdiction] = useState([]);
   const [mapping, setMapping] = useState({});
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState('');
+  const hasLoadedRef = useRef(false);
+  const inFlightRef = useRef(false);
 
   const load = useCallback(async () => {
+    if (inFlightRef.current) {
+      return;
+    }
     if (!role) {
       setApplications([]);
       setJurisdiction([]);
       setMapping({});
       setError('');
+      hasLoadedRef.current = false;
       return;
     }
 
-    setIsLoading(true);
+    inFlightRef.current = true;
+    if (!hasLoadedRef.current) {
+      setIsLoading(true);
+    }
     setError('');
 
     try {
@@ -73,14 +83,27 @@ export const useDepartmentData = (role) => {
       setMapping({});
       setError(loadError?.message || 'Failed to fetch department applications.');
     } finally {
+      hasLoadedRef.current = true;
       setIsLoading(false);
+      inFlightRef.current = false;
     }
   }, [role]);
 
   useEffect(() => {
     load();
-    const intervalId = setInterval(load, 10000);
-    return () => clearInterval(intervalId);
+    const runVisibleRefresh = () => {
+      if (document.visibilityState === 'visible') {
+        load();
+      }
+    };
+
+    const intervalId = setInterval(runVisibleRefresh, POLL_INTERVAL_MS);
+    document.addEventListener('visibilitychange', runVisibleRefresh);
+
+    return () => {
+      clearInterval(intervalId);
+      document.removeEventListener('visibilitychange', runVisibleRefresh);
+    };
   }, [load]);
 
   return {

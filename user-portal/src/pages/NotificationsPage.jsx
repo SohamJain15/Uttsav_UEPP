@@ -1,27 +1,45 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import NotificationCard from "../components/NotificationCard";
 import { notificationService } from "../services/notificationService";
 
 const NotificationsPage = () => {
+  const POLL_INTERVAL_MS = 30000;
   const [notifications, setNotifications] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
+  const inFlightRef = useRef(false);
+  const hasLoadedRef = useRef(false);
 
   useEffect(() => {
     const loadNotifications = async () => {
+      if (inFlightRef.current) return;
+      inFlightRef.current = true;
       try {
-        setIsLoading(true);
+        if (!hasLoadedRef.current) {
+          setIsLoading(true);
+        }
         const response = await notificationService.getNotifications();
         setNotifications(response || []);
       } catch (error) {
         console.error("Failed to fetch notifications:", error);
       } finally {
+        hasLoadedRef.current = true;
         setIsLoading(false);
+        inFlightRef.current = false;
       }
     };
 
     loadNotifications();
-    const intervalId = setInterval(loadNotifications, 15000);
-    return () => clearInterval(intervalId);
+    const runVisibleRefresh = () => {
+      if (document.visibilityState === "visible") {
+        loadNotifications();
+      }
+    };
+    const intervalId = setInterval(runVisibleRefresh, POLL_INTERVAL_MS);
+    document.addEventListener("visibilitychange", runVisibleRefresh);
+    return () => {
+      clearInterval(intervalId);
+      document.removeEventListener("visibilitychange", runVisibleRefresh);
+    };
   }, []);
 
   return (

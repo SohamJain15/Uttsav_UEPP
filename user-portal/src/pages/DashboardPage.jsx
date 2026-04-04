@@ -1,20 +1,37 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import StatsCard from "../components/StatsCard";
 import ApplicationCard from "../components/ApplicationCard";
 import { applicationService } from "../services/applicationService";
 
 const DashboardPage = () => {
+  const POLL_INTERVAL_MS = 30000;
   const [applications, setApplications] = useState([]);
+  const inFlightRef = useRef(false);
 
   useEffect(() => {
     const loadData = async () => {
-      const response = await applicationService.getApplications();
-      setApplications(Array.isArray(response) ? response : []);
+      if (inFlightRef.current) return;
+      inFlightRef.current = true;
+      try {
+        const response = await applicationService.getApplications();
+        setApplications(Array.isArray(response) ? response : []);
+      } finally {
+        inFlightRef.current = false;
+      }
     };
 
     loadData();
-    const intervalId = setInterval(loadData, 12000);
-    return () => clearInterval(intervalId);
+    const runVisibleRefresh = () => {
+      if (document.visibilityState === "visible") {
+        loadData();
+      }
+    };
+    const intervalId = setInterval(runVisibleRefresh, POLL_INTERVAL_MS);
+    document.addEventListener("visibilitychange", runVisibleRefresh);
+    return () => {
+      clearInterval(intervalId);
+      document.removeEventListener("visibilitychange", runVisibleRefresh);
+    };
   }, []);
 
   const stats = useMemo(() => {

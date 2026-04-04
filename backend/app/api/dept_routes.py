@@ -104,6 +104,76 @@ def _derive_risk_level(crowd_size: int) -> str:
     return "Low"
 
 
+def _coerce_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return default
+
+
+def _risk_score_from_level(level: str) -> int:
+    normalized = _normalize_risk_level(level)
+    if normalized == "High":
+        return 80
+    if normalized == "Low":
+        return 30
+    return 55
+
+
+def _exit_safety_from_level(level: str) -> str:
+    normalized = _normalize_risk_level(level)
+    if normalized == "High":
+        return "Needs Review"
+    if normalized == "Low":
+        return "Strong"
+    return "Moderate"
+
+
+def _capacity_utilization_from_crowd(crowd_size: int) -> int:
+    crowd = max(_coerce_int(crowd_size, 0), 0)
+    if crowd <= 0:
+        return 0
+    assumed_capacity = max(int(round(crowd * 1.25)), 1)
+    utilization = int(round((crowd / assumed_capacity) * 100))
+    return max(1, min(100, utilization))
+
+
+def _build_ai_risk_context(ai_logs: Dict[str, Any], crowd_size: int) -> Dict[str, Any]:
+    logs = ai_logs or {}
+    risk_level = _normalize_risk_level(
+        logs.get("base_risk_score")
+        or logs.get("exit_safety_rating")
+        or _derive_risk_level(crowd_size)
+    )
+
+    risk_score = _coerce_int(logs.get("numerical_risk_score"), _risk_score_from_level(risk_level))
+    risk_score = max(0, min(100, risk_score))
+
+    capacity_utilization = _coerce_int(
+        logs.get("capacity_utilization"),
+        _capacity_utilization_from_crowd(crowd_size),
+    )
+    capacity_utilization = max(0, min(100, capacity_utilization))
+
+    recommendation = str(logs.get("ollama_recommendation") or "").strip()
+    if not recommendation:
+        recommendation = (
+            "Prioritize route, crowd, and emergency checks before final approval."
+            if risk_level == "High"
+            else "Proceed with standard departmental verification checklist."
+        )
+
+    return {
+        "risk_level": risk_level,
+        "breakdown": {
+            "capacityUtilization": capacity_utilization,
+            "exitSafetyRating": str(logs.get("exit_safety_rating") or "").strip() or _exit_safety_from_level(risk_level),
+            "riskScore": risk_score,
+            "recommendation": recommendation,
+        },
+    }
+
+
 def _derive_overall_status_from_routings(routing_rows: List[Dict[str, Any]]) -> str:
     statuses = [_normalize_routing_status(row.get("status")) for row in routing_rows]
     if not statuses:
@@ -210,6 +280,8 @@ def _extract_noc_payload(
 def _serialize_department_application(bundle: Dict[str, Any], department: Optional[str]) -> Dict[str, Any]:
     application = bundle.get("application") or {}
     event = bundle.get("event") or {}
+    ai_logs = bundle.get("ai_logs") or {}
+    organizer_profile = bundle.get("organizer_profile") or {}
     routing_rows = list(bundle.get("department_routings") or [])
     documents = list(bundle.get("documents") or [])
 
@@ -261,11 +333,15 @@ def _serialize_department_application(bundle: Dict[str, Any], department: Option
     )
 
     crowd_size = int(event.get("expected_crowd") or 0)
-    risk_level = _derive_risk_level(crowd_size)
-    risk_score = 75 if risk_level == "High" else 50 if risk_level == "Medium" else 30
+    ai_risk_context = _build_ai_risk_context(ai_logs, crowd_size)
+    risk_level = ai_risk_context["risk_level"]
     area = str(event.get("city") or "").strip() or "Unknown Area"
     pincode = str(event.get("pincode") or "").strip() or "000000"
     venue = str(event.get("raw_address") or "").strip() or "Venue details pending"
+    organizer_name = (
+        str(organizer_profile.get("full_name") or organizer_profile.get("name") or "").strip()
+        or str(application.get("user_id") or "Organizer")
+    )
 
     focus_data = {
         "Police": {
@@ -309,7 +385,7 @@ def _serialize_department_application(bundle: Dict[str, Any], department: Option
         "date": str(event.get("start_time") or "")[:10],
         "submittedAt": application.get("submitted_at"),
         "updatedAt": max((row.get("updated_at") for row in routing_rows if row.get("updated_at")), default=None),
-        "organizerName": str(application.get("user_id") or "Organizer"),
+        "organizerName": organizer_name,
         "crowdSize": crowd_size,
         "area": area,
         "pincode": pincode,
@@ -326,14 +402,7 @@ def _serialize_department_application(bundle: Dict[str, Any], department: Option
             application.get("created_at"),
         ),
         "documents": document_payload,
-        "aiRiskBreakdown": {
-            "capacityUtilization": min(max(int(round((crowd_size / 2500) * 100)) if crowd_size else 20, 0), 100),
-            "exitSafetyRating": "Needs Review" if risk_level == "High" else "Moderate" if risk_level == "Medium" else "Strong",
-            "riskScore": risk_score,
-            "recommendation": "Prioritize route, crowd, and emergency checks before final approval."
-            if risk_level == "High"
-            else "Proceed with standard departmental verification checklist.",
-        },
+        "aiRiskBreakdown": ai_risk_context["breakdown"],
         "focusData": focus_data,
         "queryByDepartment": query_by_department,
         "rejectionReasonByDepartment": rejection_reason_by_department,
@@ -373,12 +442,81 @@ def _fetch_application_bundle(app_id: str, department: Optional[str] = None) -> 
         .execute()
     )
 
+    ai_logs = None
+    try:
+        ai_logs_response = (
+            db.table("ai_intelligence_logs")
+            .select("*")
+            .eq("app_id", app_id)
+            .limit(1)
+            .execute()
+        )
+        ai_logs = first_row(ai_logs_response.data)
+    except Exception:
+        ai_logs = None
+
+    organizer_profile = None
+    organizer_id = application.get("user_id") or ((event or {}).get("organizer_id") if isinstance(event, dict) else None)
+    if organizer_id:
+        try:
+            organizer_profile = fetch_user_profile(str(organizer_id))
+        except Exception:
+            organizer_profile = None
+
     return {
         "application": application,
         "event": event,
         "department_routings": routing_response.data or [],
         "documents": docs_response.data or [],
+        "ai_logs": ai_logs,
+        "organizer_profile": organizer_profile,
     }
+
+
+def _chunked(values: List[str], chunk_size: int = 200) -> List[List[str]]:
+    return [values[idx : idx + chunk_size] for idx in range(0, len(values), chunk_size)]
+
+
+def _fetch_rows_by_in(
+    table_name: str,
+    select_query: str,
+    field_name: str,
+    values: List[str],
+    order_by: Optional[str] = None,
+    desc: bool = False,
+) -> List[Dict[str, Any]]:
+    if not values:
+        return []
+
+    rows: List[Dict[str, Any]] = []
+    for chunk in _chunked(values):
+        query = db.table(table_name).select(select_query).in_(field_name, chunk)
+        if order_by:
+            query = query.order(order_by, desc=desc)
+        response = query.execute()
+        rows.extend(response.data or [])
+    return rows
+
+
+def _fetch_profiles_by_ids(user_ids: List[str]) -> Dict[str, Dict[str, Any]]:
+    if not user_ids:
+        return {}
+
+    rows = _fetch_rows_by_in("users", "*", "id", user_ids)
+    profile_map: Dict[str, Dict[str, Any]] = {}
+    for row in rows:
+        user_id = str(row.get("id") or "").strip()
+        if not user_id:
+            continue
+        profile_map[user_id] = {
+            **row,
+            "full_name": row.get("full_name") or row.get("name"),
+            "phone_number": row.get("phone_number") or row.get("phone"),
+            "department": row.get("department") or row.get("role"),
+            "organization": row.get("organization") or row.get("organization_type"),
+            "username": row.get("username") or row.get("prefix") or row.get("email"),
+        }
+    return profile_map
 
 
 def _sync_application_status(app_id: str) -> str:
@@ -770,9 +908,94 @@ async def get_current_department_applications(current=Depends(get_current_user))
             app_ids = [row.get("app_id") for row in routing_rows if row.get("app_id")]
 
         deduped_ids = list(dict.fromkeys(app_ids))
+        if not deduped_ids:
+            return {
+                "status": "success",
+                "department": department,
+                "applications": [],
+            }
+
+        application_rows = _fetch_rows_by_in("applications", "*", "app_id", deduped_ids)
+        applications_by_id = {
+            str(row.get("app_id")): row
+            for row in application_rows
+            if row.get("app_id")
+        }
+
+        event_ids = [
+            str(row.get("event_id"))
+            for row in application_rows
+            if row.get("event_id")
+        ]
+        event_rows = _fetch_rows_by_in("events", "*", "id", event_ids)
+        events_by_id = {
+            str(row.get("id")): row
+            for row in event_rows
+            if row.get("id")
+        }
+
+        routing_rows = _fetch_rows_by_in(
+            "department_routings",
+            "*",
+            "app_id",
+            deduped_ids,
+            order_by="updated_at",
+            desc=True,
+        )
+        routing_by_app: Dict[str, List[Dict[str, Any]]] = {}
+        for row in routing_rows:
+            key = str(row.get("app_id") or "")
+            if key:
+                routing_by_app.setdefault(key, []).append(row)
+
+        document_rows = _fetch_rows_by_in(
+            "documents",
+            "id, app_id, doc_type, file_name, storage_url, uploaded_at",
+            "app_id",
+            deduped_ids,
+            order_by="uploaded_at",
+            desc=True,
+        )
+        documents_by_app: Dict[str, List[Dict[str, Any]]] = {}
+        for row in document_rows:
+            key = str(row.get("app_id") or "")
+            if key:
+                documents_by_app.setdefault(key, []).append(row)
+
+        ai_log_rows = _fetch_rows_by_in("ai_intelligence_logs", "*", "app_id", deduped_ids)
+        ai_logs_by_app = {
+            str(row.get("app_id")): row
+            for row in ai_log_rows
+            if row.get("app_id")
+        }
+
+        organizer_ids = set()
+        for app_row in application_rows:
+            if app_row.get("user_id"):
+                organizer_ids.add(str(app_row.get("user_id")))
+            event_row = events_by_id.get(str(app_row.get("event_id") or ""))
+            if event_row and event_row.get("organizer_id"):
+                organizer_ids.add(str(event_row.get("organizer_id")))
+        organizer_profiles_by_id = _fetch_profiles_by_ids(list(organizer_ids))
+
         applications = []
         for app_id in deduped_ids:
-            bundle = _fetch_application_bundle(app_id, department=None)
+            app_row = applications_by_id.get(str(app_id))
+            if not app_row:
+                continue
+            event_row = events_by_id.get(str(app_row.get("event_id") or ""))
+            organizer_id = (
+                str(app_row.get("user_id") or "").strip()
+                or str((event_row or {}).get("organizer_id") or "").strip()
+            )
+            bundle = {
+                "application": app_row,
+                "event": event_row or {},
+                "department_routings": routing_by_app.get(str(app_id), []),
+                "documents": documents_by_app.get(str(app_id), []),
+                "ai_logs": ai_logs_by_app.get(str(app_id), {}),
+                "organizer_profile": organizer_profiles_by_id.get(organizer_id, {}),
+            }
             applications.append(_serialize_department_application(bundle, department=department))
 
         return {

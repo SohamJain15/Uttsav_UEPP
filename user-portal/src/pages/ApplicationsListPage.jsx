@@ -1,19 +1,36 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import ApplicationCard from "../components/ApplicationCard";
 import { applicationService } from "../services/applicationService";
 
 const ApplicationsListPage = () => {
+  const POLL_INTERVAL_MS = 30000;
   const [applications, setApplications] = useState([]);
+  const inFlightRef = useRef(false);
 
   useEffect(() => {
     const loadApplications = async () => {
-      const response = await applicationService.getApplications();
-      setApplications(Array.isArray(response) ? response : []);
+      if (inFlightRef.current) return;
+      inFlightRef.current = true;
+      try {
+        const response = await applicationService.getApplications();
+        setApplications(Array.isArray(response) ? response : []);
+      } finally {
+        inFlightRef.current = false;
+      }
     };
 
     loadApplications();
-    const intervalId = setInterval(loadApplications, 12000);
-    return () => clearInterval(intervalId);
+    const runVisibleRefresh = () => {
+      if (document.visibilityState === "visible") {
+        loadApplications();
+      }
+    };
+    const intervalId = setInterval(runVisibleRefresh, POLL_INTERVAL_MS);
+    document.addEventListener("visibilitychange", runVisibleRefresh);
+    return () => {
+      clearInterval(intervalId);
+      document.removeEventListener("visibilitychange", runVisibleRefresh);
+    };
   }, []);
 
   return (

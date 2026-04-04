@@ -18,8 +18,13 @@ const LoginPage = () => {
       await login(values);
       navigate("/dashboard", { replace: true });
     } catch (error) {
+      const detail =
+        error?.response?.data?.detail ||
+        error?.response?.data?.message ||
+        (typeof error?.response?.data === "string" ? error.response.data : "") ||
+        error?.message;
       setErrorMessage(
-        error?.response?.data?.detail || "Unable to sign in. Please check your credentials and try again."
+        detail || "Unable to sign in. Please check your credentials and try again."
       );
     } finally {
       setLoading(false);

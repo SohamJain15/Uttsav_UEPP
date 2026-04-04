@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import {
   AlertTriangle,
@@ -74,6 +74,7 @@ const downloadFile = async (url, fileName) => {
 };
 
 const ApplicationTrackingPage = () => {
+  const POLL_INTERVAL_MS = 30000;
   const { id } = useParams();
   const [application, setApplication] = useState(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -81,18 +82,27 @@ const ApplicationTrackingPage = () => {
   const [queryResponses, setQueryResponses] = useState({});
   const [queryMessage, setQueryMessage] = useState("");
   const [isSubmittingQuery, setIsSubmittingQuery] = useState(false);
+  const inFlightRef = useRef(false);
+  const hasLoadedRef = useRef(false);
 
   useEffect(() => {
     if (!id) {
       setApplication(null);
       setIsLoading(false);
+      hasLoadedRef.current = false;
+      inFlightRef.current = false;
       return undefined;
     }
 
+    hasLoadedRef.current = false;
+    inFlightRef.current = false;
+
     let isMounted = true;
     const loadApplication = async () => {
+      if (inFlightRef.current) return;
+      inFlightRef.current = true;
       try {
-        if (isMounted) setIsLoading(true);
+        if (isMounted && !hasLoadedRef.current) setIsLoading(true);
         const payload = await applicationService.getApplicationById(id);
         if (isMounted) {
           setApplication(payload);
@@ -108,16 +118,25 @@ const ApplicationTrackingPage = () => {
           );
         }
       } finally {
+        hasLoadedRef.current = true;
         if (isMounted) setIsLoading(false);
+        inFlightRef.current = false;
       }
     };
 
     loadApplication();
-    const intervalId = setInterval(loadApplication, 12000);
+    const runVisibleRefresh = () => {
+      if (document.visibilityState === "visible") {
+        loadApplication();
+      }
+    };
+    const intervalId = setInterval(runVisibleRefresh, POLL_INTERVAL_MS);
+    document.addEventListener("visibilitychange", runVisibleRefresh);
 
     return () => {
       isMounted = false;
       clearInterval(intervalId);
+      document.removeEventListener("visibilitychange", runVisibleRefresh);
     };
   }, [id]);
 

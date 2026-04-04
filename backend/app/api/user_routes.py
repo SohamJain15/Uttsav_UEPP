@@ -95,6 +95,10 @@ def _department_candidates(name: str) -> List[str]:
     return [item for item in dict.fromkeys(candidates) if item]
 
 
+def _chunked(values: List[str], chunk_size: int = 200) -> List[List[str]]:
+    return [values[idx : idx + chunk_size] for idx in range(0, len(values), chunk_size)]
+
+
 def _insert_event_with_schema_fallback(
     event_id: str,
     user_id: str,
@@ -150,7 +154,6 @@ def _insert_application_with_schema_fallback(app_id: str, event_id: str, user_id
             "status": "Submitted",
             "submitted_at": now_iso,
             "user_id": str(user_id),  # Ensure user_id is string UUID
-            "user_id": user_id,
         },
         {
             "app_id": app_id,
@@ -232,29 +235,55 @@ def _fetch_user_application_rows(user_id: str) -> List[Dict[str, Any]]:
             return response.data
     except Exception:
         pass
-    
-    # Fallback: fetch applications via event organizer (user created the event)
+
+    # Optimized fallback: resolve event ids for this organizer, then fetch only linked applications.
     try:
-        response = (
-            db.table("applications")
-            .select(
-                "app_id, status, submitted_at, events!inner(id, organizer_id, name, category, expected_crowd, start_time, raw_address)"
-            )
+        events_response = (
+            db.table("events")
+            .select("id, organizer_id, name, category, expected_crowd, start_time, raw_address")
+            .eq("organizer_id", user_id)
+            .order("start_time", desc=True)
             .execute()
         )
-        # Filter client-side for events where organizer_id matches
-        filtered = []
-        for app in response.data or []:
-            event = app.get("events") or {}
-            if isinstance(event, list) and event:
-                event = event[0]
-            if event.get("organizer_id") == user_id:
-                filtered.append(app)
-        if filtered:
-            return filtered
+        event_rows = events_response.data or []
+        if not event_rows:
+            return []
+
+        event_ids = [str(row.get("id")) for row in event_rows if row.get("id")]
+        if not event_ids:
+            return []
+
+        application_rows: List[Dict[str, Any]] = []
+        for chunk in _chunked(event_ids):
+            chunk_rows = (
+                db.table("applications")
+                .select("app_id, status, submitted_at, event_id")
+                .in_("event_id", chunk)
+                .order("submitted_at", desc=True)
+                .execute()
+                .data
+                or []
+            )
+            application_rows.extend(chunk_rows)
+
+        if not application_rows:
+            return []
+
+        event_by_id = {str(row.get("id")): row for row in event_rows if row.get("id")}
+        application_rows.sort(key=lambda row: str(row.get("submitted_at") or ""), reverse=True)
+        return [
+            {
+                "app_id": row.get("app_id"),
+                "status": row.get("status"),
+                "submitted_at": row.get("submitted_at"),
+                "events": event_by_id.get(str(row.get("event_id") or ""), {}),
+            }
+            for row in application_rows
+            if row.get("app_id")
+        ]
     except Exception:
         pass
-    
+
     return []
 
 
@@ -484,6 +513,82 @@ def _calculate_weighted_risk_score(event: Dict[str, Any]) -> Dict[str, Any]:
             "duration": 15,
         },
     }
+
+
+def _normalize_risk_level(raw_level: Any) -> str:
+    normalized = str(raw_level or "").strip().lower()
+    if "high" in normalized:
+        return "High"
+    if "low" in normalized:
+        return "Low"
+    return "Medium"
+
+
+def _risk_score_from_level(level: str, confidence: float) -> int:
+    normalized = _normalize_risk_level(level)
+    base = {"Low": 30, "Medium": 55, "High": 80}.get(normalized, 55)
+    adjusted = base + ((float(confidence or 0.0) - 50.0) * 0.25)
+    return max(5, min(98, int(round(adjusted))))
+
+
+def _exit_safety_from_level(level: str) -> str:
+    normalized = _normalize_risk_level(level)
+    if normalized == "High":
+        return "Needs Review"
+    if normalized == "Low":
+        return "Strong"
+    return "Moderate"
+
+
+def _capacity_utilization_from_crowd(crowd_size: int) -> int:
+    crowd = max(int(crowd_size or 0), 0)
+    if crowd == 0:
+        return 0
+    # Frontend expects a percentage; use model-default utilization assumption when venue capacity is unknown.
+    assumed_capacity = max(int(round(crowd * 1.25)), 1)
+    utilization = int(round((crowd / assumed_capacity) * 100))
+    return max(1, min(100, utilization))
+
+
+def _build_risk_payload_from_submit(payload: ApplicationSubmitRequest) -> Dict[str, Any]:
+    start_dt = payload.start_date
+    end_dt = payload.end_date
+    return {
+        "event_type": payload.event_type,
+        "venue_type": payload.venue_type,
+        "crowd_size": payload.crowd_size,
+        "start_date": start_dt.date().isoformat(),
+        "end_date": end_dt.date().isoformat(),
+        "start_time": start_dt.strftime("%H:%M"),
+        "end_time": end_dt.strftime("%H:%M"),
+        "fireworks": payload.has_fireworks,
+        "soundSystem": payload.has_loudspeakers,
+        "is_moving_procession": payload.is_moving_procession,
+        "foodStalls": payload.food_stalls,
+    }
+
+
+def _persist_risk_log_for_application(app_id: str, payload: ApplicationSubmitRequest) -> None:
+    risk_output = analyze_risk(_build_risk_payload_from_submit(payload))
+    normalized_level = _normalize_risk_level(risk_output.get("risk_level"))
+    confidence = float(risk_output.get("confidence") or 0.0)
+    score = _risk_score_from_level(normalized_level, confidence)
+    recommendation = str(risk_output.get("ai_recommendation") or "").strip()
+    driving_factors = risk_output.get("driving_factors") if isinstance(risk_output.get("driving_factors"), list) else []
+
+    db.table("ai_intelligence_logs").upsert(
+        _json_ready(
+            {
+                "app_id": app_id,
+                "base_risk_score": normalized_level,
+                "numerical_risk_score": score,
+                "capacity_utilization": _capacity_utilization_from_crowd(payload.crowd_size),
+                "exit_safety_rating": _exit_safety_from_level(normalized_level),
+                "shap_feature_importances": driving_factors,
+                "ollama_recommendation": recommendation,
+            }
+        )
+    ).execute()
 
 
 @router.post("/signup")
@@ -736,6 +841,14 @@ async def submit_application(payload: ApplicationSubmitRequest, current=Depends(
             ordered_departments.append(department)
 
         _insert_department_routings_with_fallback(custom_app_id, ordered_departments)
+
+        try:
+            _persist_risk_log_for_application(custom_app_id, payload)
+        except RiskEngineError:
+            # Keep application submission flow resilient even if local AI engine is unavailable.
+            pass
+        except Exception:
+            pass
 
         return {
             "status": "success",
