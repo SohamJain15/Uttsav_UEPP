@@ -1,9 +1,48 @@
+const normalizeStatus = (value) => {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (normalized === 'approved' || normalized === 'approve') return 'Approved';
+  if (normalized === 'rejected' || normalized === 'reject' || normalized === 'denied') return 'Rejected';
+  if (normalized === 'query' || normalized === 'query raised' || normalized === 'query_raised') return 'Query Raised';
+  if (normalized === 'in review' || normalized === 'in_review' || normalized === 'review') return 'In Review';
+  if (normalized === 'pending' || normalized === 'submitted' || !normalized) return 'Pending';
+  return String(value || '').trim() || 'Pending';
+};
+
+const pickStatusByRole = (statusByDepartment, role) => {
+  const entries = Object.entries(statusByDepartment || {});
+  const normalizedRole = String(role || '').trim().toLowerCase();
+  if (!normalizedRole) return null;
+
+  const roleWithSuffix = normalizedRole.endsWith(' department')
+    ? normalizedRole
+    : `${normalizedRole} department`;
+  const roleWithoutSuffix = normalizedRole.replace(/\s+department$/i, '');
+
+  for (const [key, value] of entries) {
+    const normalizedKey = String(key || '').trim().toLowerCase();
+    if (
+      normalizedKey === normalizedRole ||
+      normalizedKey === roleWithSuffix ||
+      normalizedKey === roleWithoutSuffix
+    ) {
+      return value;
+    }
+  }
+  return null;
+};
+
 export const getDepartmentStatus = (application, role) => {
-  if (role === 'Admin') {
-    return application.overallStatus;
+  if (String(role || '').trim().toLowerCase() === 'admin') {
+    return normalizeStatus(application.overallStatus);
   }
 
-  return application.statusByDepartment[role] ?? 'Pending';
+  const byDepartment = application.statusByDepartment || {};
+  const picked =
+    pickStatusByRole(byDepartment, role) ??
+    application.departmentStatus ??
+    application.overallStatus ??
+    'Pending';
+  return normalizeStatus(picked);
 };
 
 export const createDefaultFilters = (status = 'all') => ({

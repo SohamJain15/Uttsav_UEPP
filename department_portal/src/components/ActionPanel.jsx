@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import DecisionChecklist from './DecisionChecklist';
+import { getSlaMeta } from '../utils/sla';
 
 const baseButtonClass =
   'rounded-xl px-3 py-2 text-sm font-semibold transition hover:opacity-90';
@@ -8,13 +9,16 @@ const ActionPanel = ({
   role,
   currentStatus,
   riskLevel,
+  dueAt,
   checklistItems = [],
   onSubmitAction
 }) => {
   const [comment, setComment] = useState('');
   const isHighRisk = riskLevel === 'High';
+  const slaMeta = getSlaMeta(dueAt);
+  const isUrgentByTime = slaMeta.priorityRank <= 2;
 
-  const buttonOrder = isHighRisk
+  const buttonOrder = isHighRisk && !isUrgentByTime
     ? [
         {
           key: 'query',
@@ -35,7 +39,7 @@ const ActionPanel = ({
     : [
         {
           key: 'approve',
-          label: 'Approve',
+          label: isUrgentByTime ? 'Approve (Priority)' : 'Approve',
           className: `${baseButtonClass} bg-statusGreen text-white`
         },
         {
@@ -51,6 +55,10 @@ const ActionPanel = ({
       ];
 
   const triggerAction = (action) => {
+    if (action === 'reject' && !String(comment || '').trim()) {
+      window.alert('Rejection reason is mandatory.');
+      return;
+    }
     onSubmitAction(action, comment);
     setComment('');
   };
@@ -78,6 +86,11 @@ const ActionPanel = ({
       {isHighRisk ? (
         <p className="mt-2 rounded-xl bg-statusRed/10 px-3 py-2 text-sm font-semibold text-statusRed">
           High-risk event: Query is prioritized before approval.
+        </p>
+      ) : null}
+      {isUrgentByTime ? (
+        <p className="mt-2 rounded-xl bg-statusYellow/10 px-3 py-2 text-sm font-semibold text-statusYellow">
+          Time Priority: {slaMeta.priority} ({slaMeta.label}). Review and decide quickly.
         </p>
       ) : null}
 

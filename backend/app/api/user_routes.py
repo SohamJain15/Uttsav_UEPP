@@ -1,4 +1,5 @@
 import uuid
+import os
 from datetime import UTC, datetime, timedelta
 from typing import Any, Dict, List, Optional
 
@@ -25,6 +26,7 @@ from app.services.rag_assistant import AssistantError, answer_assistant_query
 from app.services.risk_engine import RiskEngineError, analyze_risk
 
 router = APIRouter()
+BACKEND_PUBLIC_BASE_URL = os.getenv("BACKEND_PUBLIC_BASE_URL", "http://127.0.0.1:8001").rstrip("/")
 
 
 def _user_public_dict(user: Any) -> Optional[Dict[str, Any]]:
@@ -364,6 +366,70 @@ def _assert_application_owner(payload: Dict[str, Any], user_id: str) -> None:
     owner_id = application.get("user_id") or event.get("organizer_id")
     if owner_id and str(owner_id) != str(user_id):
         raise HTTPException(status_code=403, detail="You are not allowed to access this application")
+
+
+def _normalize_department_name(value: Any) -> str:
+    normalized = str(value or "").strip().lower()
+    if "police" in normalized:
+        return "Police"
+    if "fire" in normalized:
+        return "Fire"
+    if "traffic" in normalized:
+        return "Traffic"
+    if "municip" in normalized:
+        return "Municipality"
+    if "admin" in normalized:
+        return "Admin"
+    return str(value or "").strip() or "Department"
+
+
+def _build_user_document_payload(app_id: str, documents: List[Dict[str, Any]]) -> Dict[str, Any]:
+    department_nocs = []
+    final_noc = None
+    normal_documents = []
+
+    for row in documents or []:
+        file_name = row.get("file_name") or "document"
+        storage_url = row.get("storage_url")
+        uploaded_at = row.get("uploaded_at")
+        doc_type = str(row.get("doc_type") or "")
+        document = {
+            "id": row.get("id"),
+            "doc_type": doc_type or "General",
+            "file_name": file_name,
+            "storage_url": storage_url,
+            "uploaded_at": uploaded_at,
+        }
+
+        if doc_type == "NOC_FINAL":
+            final_noc = {
+                "permitId": f"UTTSAV-NOC-{app_id}",
+                "applicationId": app_id,
+                "url": storage_url,
+                "fileName": file_name,
+                "issueDate": uploaded_at,
+                "qrCode": f"{BACKEND_PUBLIC_BASE_URL}/api/dept/noc/{app_id}/pdf",
+            }
+            continue
+
+        if doc_type.startswith("NOC_"):
+            department_nocs.append(
+                {
+                    "department": doc_type.replace("NOC_", ""),
+                    "url": storage_url,
+                    "fileName": file_name,
+                    "timestamp": uploaded_at,
+                }
+            )
+            continue
+
+        normal_documents.append(document)
+
+    return {
+        "documents": normal_documents,
+        "department_nocs": department_nocs,
+        "final_noc": final_noc,
+    }
 
 
 def _fetch_single_application_row(app_id: str) -> Dict[str, Any]:
@@ -764,7 +830,7 @@ async def get_application_detail(app_id: str, current=Depends(get_current_user))
         payload["application"]["status"] = overall_status
         payload["departments"] = [
             {
-                "name": row.get("department"),
+                "name": _normalize_department_name(row.get("department")),
                 "status": _normalize_department_status(row.get("status")),
                 "reason": row.get("rejection_reason"),
                 "updatedAt": row.get("updated_at"),
@@ -773,6 +839,10 @@ async def get_application_detail(app_id: str, current=Depends(get_current_user))
             for row in department_rows
             if row.get("department")
         ]
+        documents_payload = _build_user_document_payload(app_id, payload.get("documents") or [])
+        payload["documents"] = documents_payload["documents"]
+        payload["department_nocs"] = documents_payload["department_nocs"]
+        payload["final_noc"] = documents_payload["final_noc"]
         return {
             "status": "success",
             "data": payload,

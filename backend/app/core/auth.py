@@ -1,8 +1,9 @@
+from supabase import create_client
 from typing import Any, Dict, Optional
 
 from fastapi import Header, HTTPException
 
-from app.core.database import db
+from app.core.database import SUPABASE_ANON_KEY, SUPABASE_SERVICE_ROLE_KEY, SUPABASE_URL, db
 
 
 def _serialize_user(user: Any) -> Dict[str, Any]:
@@ -92,7 +93,10 @@ async def get_current_user(authorization: Optional[str] = Header(default=None)) 
         }
 
     try:
-        response = db.auth.get_user(token)
+        # Use an isolated auth client so token checks do not mutate the shared service-role client session.
+        auth_key = SUPABASE_ANON_KEY or SUPABASE_SERVICE_ROLE_KEY
+        auth_client = create_client(SUPABASE_URL, auth_key)
+        response = auth_client.auth.get_user(token)
         user_data = _serialize_user(getattr(response, "user", None))
     except Exception as exc:
         raise HTTPException(

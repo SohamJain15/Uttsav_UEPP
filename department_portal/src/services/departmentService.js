@@ -24,6 +24,65 @@ const normalizeDepartmentApplication = (item = {}) => {
   const reviewedAtByDepartment = item.reviewedAtByDepartment || {};
   const riskLevel = normalizeRisk(item.riskLevel);
 
+  const rawDocuments = Array.isArray(item.documents) ? item.documents : [];
+  const allDocuments = rawDocuments
+    .map((doc) => {
+      if (!doc) return null;
+      if (typeof doc === 'string') {
+        return {
+          id: `doc-${doc}`,
+          docType: 'General',
+          fileName: doc,
+          url: '',
+          uploadedAt: '',
+        };
+      }
+      return {
+        id: doc.id || `${doc.fileName || doc.file_name || 'doc'}-${doc.uploadedAt || ''}`,
+        docType: doc.docType || doc.doc_type || 'General',
+        fileName: doc.fileName || doc.file_name || 'document',
+        url: doc.url || doc.storage_url || doc.document_url || '',
+        uploadedAt: doc.uploadedAt || doc.uploaded_at || '',
+      };
+    })
+    .filter(Boolean);
+
+  const documents = allDocuments.filter((doc) => !String(doc.docType || '').startsWith('NOC'));
+
+  const departmentNOCs = Array.isArray(item.departmentNOCs)
+    ? item.departmentNOCs
+    : allDocuments
+      .filter((doc) => String(doc.docType || '').startsWith('NOC_') && doc.docType !== 'NOC_FINAL')
+      .map((doc) => ({
+        applicationId: item.id || '',
+        department: String(doc.docType).replace('NOC_', ''),
+        approvedBy: '',
+        timestamp: doc.uploadedAt,
+        conditions: [],
+        remarks: '',
+        fileName: doc.fileName,
+        url: doc.url,
+      }));
+
+  const finalNOC = item.finalNOC
+    ? item.finalNOC
+    : (() => {
+        const finalDoc = allDocuments.find((doc) => doc.docType === 'NOC_FINAL');
+        if (!finalDoc) return null;
+        return {
+          permitId: `UTTSAV-NOC-${item.id || ''}`,
+          applicationId: item.id || '',
+          eventName: item.eventName || '',
+          approvedDepartments: requiredDepartments,
+          issueDate: finalDoc.uploadedAt,
+          validity: 'As per departmental rules and event timeline',
+          combinedConditions: [],
+          qrCode: '',
+          url: finalDoc.url,
+          fileName: finalDoc.fileName,
+        };
+      })();
+
   return {
     id: item.id || '',
     eventName: item.eventName || 'Unknown Event',
@@ -33,6 +92,8 @@ const normalizeDepartmentApplication = (item = {}) => {
     venue: item.venue || 'Venue details pending',
     area: item.area || 'Unknown Area',
     pincode: item.pincode || '000000',
+    latitude: Number.isFinite(Number(item.latitude)) ? Number(item.latitude) : null,
+    longitude: Number.isFinite(Number(item.longitude)) ? Number(item.longitude) : null,
     crowdSize: Number(item.crowdSize || 0),
     riskLevel,
     requiredDepartments,
@@ -43,7 +104,7 @@ const normalizeDepartmentApplication = (item = {}) => {
     dueAt: item.dueAt || '',
     submittedAt: item.submittedAt || '',
     updatedAt: item.updatedAt || '',
-    documents: Array.isArray(item.documents) ? item.documents.filter(Boolean) : [],
+    documents,
     aiRiskBreakdown: {
       capacityUtilization: Number(item.aiRiskBreakdown?.capacityUtilization || 0),
       exitSafetyRating: item.aiRiskBreakdown?.exitSafetyRating || 'Needs Review',
@@ -56,6 +117,8 @@ const normalizeDepartmentApplication = (item = {}) => {
     queryByDepartment: item.queryByDepartment || {},
     rejectionReasonByDepartment: item.rejectionReasonByDepartment || {},
     decisionHistory: Array.isArray(item.decisionHistory) ? item.decisionHistory : [],
+    departmentNOCs,
+    finalNOC,
   };
 };
 
@@ -89,20 +152,11 @@ export const departmentService = {
       });
     }
 
-    const response = await api.post(`/api/dept/applications/${appId}/action`, {
+    const actionResponse = await api.post(`/api/dept/applications/${appId}/action`, {
       action: normalizedAction,
       rejection_reason: rejectionReason || null,
     });
-
-    if (normalizedAction === 'approve') {
-      try {
-        return await api.post(`/api/dept/applications/${appId}/generate-noc`, {});
-      } catch (error) {
-        return response;
-      }
-    }
-
-    return response;
+    return actionResponse;
   },
 
   async getQueries() {

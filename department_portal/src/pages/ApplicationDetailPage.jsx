@@ -48,6 +48,12 @@ const getProgressText = (application) => {
     (department) => application.statusByDepartment[department] === 'Approved'
   ).length;
 
+  if (!requiredDepartments.length) {
+    return 'No departments assigned';
+  }
+  if (completeCount === requiredDepartments.length) {
+    return 'All departments cleared';
+  }
   return `${completeCount}/${requiredDepartments.length} completed`;
 };
 
@@ -128,19 +134,32 @@ const ApplicationDetailPage = () => {
   const requiredDepartments = Array.isArray(application.requiredDepartments)
     ? application.requiredDepartments
     : [];
+  const approvedCount = requiredDepartments.filter(
+    (department) => application.statusByDepartment[department] === 'Approved'
+  ).length;
+  const allDepartmentsApproved =
+    requiredDepartments.length > 0 && approvedCount === requiredDepartments.length;
   const aiRiskBreakdown = application.aiRiskBreakdown || {};
   const currentRole = user?.role || '';
+  const finalNOC = application.finalNOC || null;
+  const departmentNOCs = Array.isArray(application.departmentNOCs) ? application.departmentNOCs : [];
 
   const handleAction = async (action, comment) => {
     try {
-      await departmentService.submitAction({
+      const result = await departmentService.submitAction({
         appId: application.id,
         action,
         rejectionReason: comment,
       });
 
       if (action === 'approve') {
-        setToast({ message: 'Department NOC issued. Master Permit generated.', tone: 'success' });
+        const finalNocUrl = result?.noc?.finalNOC?.noc_url;
+        setToast({
+          message: finalNocUrl
+            ? 'Department approval saved. Final permit generated.'
+            : 'Department clearance issued successfully.',
+          tone: 'success',
+        });
       }
 
       if (action === 'reject') {
@@ -287,9 +306,35 @@ const ApplicationDetailPage = () => {
           <div className="rounded-2xl border border-borderMain bg-cardBg p-5 shadow-card">
             <h3 className="text-base font-semibold text-textMain">Documents (View Only)</h3>
             <div className="mt-3 space-y-2">
-              {application.documents.map((documentName) => (
-                <DocumentRow key={documentName} documentName={documentName} />
+              {application.documents.map((document) => (
+                <DocumentRow key={document.id || `${document.fileName}-${document.url}`} document={document} />
               ))}
+            </div>
+          </div>
+
+          <div className="rounded-2xl border border-borderMain bg-cardBg p-5 shadow-card">
+            <h3 className="text-base font-semibold text-textMain">Department Clearances</h3>
+            <div className="mt-3 space-y-3">
+              {departmentNOCs.length ? (
+                departmentNOCs.map((noc) => (
+                  <div key={`${noc.department}-${noc.timestamp}`} className="rounded-xl border border-borderMain bg-slate-50 p-3">
+                    <p className="text-sm font-semibold text-textMain">{noc.department} Clearance</p>
+                    <p className="mt-1 text-xs text-textSecondary">
+                      Issued At: {noc.timestamp ? new Date(noc.timestamp).toLocaleString() : 'N/A'}
+                    </p>
+                    <p className="mt-1 text-xs text-textSecondary">
+                      Remarks: {noc.remarks || 'No additional remarks'}
+                    </p>
+                    {noc.url ? (
+                      <div className="mt-2">
+                        <DocumentRow document={{ fileName: noc.fileName || `${noc.department}-NOC.pdf`, url: noc.url }} />
+                      </div>
+                    ) : null}
+                  </div>
+                ))
+              ) : (
+                <p className="text-sm text-textSecondary">No department clearance issued yet.</p>
+              )}
             </div>
           </div>
         </section>
@@ -306,12 +351,51 @@ const ApplicationDetailPage = () => {
             </p>
           </div>
 
+          {finalNOC ? (
+            <div className="rounded-2xl border border-statusGreen/35 bg-statusGreen/10 p-4 shadow-card">
+              <p className="text-sm font-semibold text-statusGreen">Event Approved</p>
+              <h3 className="mt-1 text-base font-bold text-textMain">
+                Final Permit: {finalNOC.permitId || `UTTSAV-NOC-${application.id}`}
+              </h3>
+              <p className="mt-1 text-sm text-textSecondary">
+                All Departments Cleared ({approvedCount}/{requiredDepartments.length})
+              </p>
+              <div className="mt-3 flex flex-wrap gap-2">
+                {finalNOC.url ? (
+                  <DocumentRow
+                    document={{
+                      fileName: finalNOC.fileName || `NOC-FINAL-${application.id}.pdf`,
+                      url: finalNOC.url,
+                    }}
+                  />
+                ) : null}
+              </div>
+              <div className="mt-3 rounded-xl border border-borderMain bg-white p-3">
+                <p className="text-xs font-semibold text-textSecondary">Verification QR</p>
+                <img
+                  src={`https://api.qrserver.com/v1/create-qr-code/?size=170x170&data=${encodeURIComponent(
+                    finalNOC.qrCode || finalNOC.url || ''
+                  )}`}
+                  alt="Final NOC QR"
+                  className="mt-2 h-[120px] w-[120px] rounded-lg border border-borderMain"
+                />
+              </div>
+            </div>
+          ) : allDepartmentsApproved ? (
+            <div className="rounded-2xl border border-statusYellow/35 bg-statusYellow/10 p-4 shadow-card">
+              <p className="text-sm font-semibold text-statusYellow">
+                All departments approved. Final NOC generation in progress.
+              </p>
+            </div>
+          ) : null}
+
           <ProgressTracker application={application} role={currentRole} />
 
           <ActionPanel
             role={currentRole}
             currentStatus={currentStatus}
             riskLevel={application.riskLevel}
+            dueAt={application.dueAt}
             checklistItems={checklistItems}
             onSubmitAction={handleAction}
           />

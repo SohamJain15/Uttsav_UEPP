@@ -12,7 +12,7 @@ const getStoredToken = () => {
 };
 
 const backendOrigin = (
-  import.meta.env.VITE_BACKEND_ORIGIN || 'http://localhost:8000'
+  import.meta.env.VITE_BACKEND_ORIGIN || 'http://localhost:8001'
 ).trim().replace(/\/$/, '');
 
 const toUrl = (path) => {

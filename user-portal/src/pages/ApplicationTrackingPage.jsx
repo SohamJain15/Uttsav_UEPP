@@ -47,6 +47,32 @@ const getCityFromAddress = (address = "") => {
   return parts[parts.length - 1] || address;
 };
 
+const downloadFile = async (url, fileName) => {
+  if (!url) return;
+  if (url.startsWith("data:")) {
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = fileName || "document.pdf";
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    return;
+  }
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`Download failed (${response.status})`);
+  }
+  const blob = await response.blob();
+  const objectUrl = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = objectUrl;
+  anchor.download = fileName || "document.pdf";
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(objectUrl);
+};
+
 const ApplicationTrackingPage = () => {
   const { id } = useParams();
   const [application, setApplication] = useState(null);
@@ -126,6 +152,8 @@ const ApplicationTrackingPage = () => {
   }, [application]);
 
   const departmentsWithRequests = timelineItems.filter((item) => item.needsAction);
+  const finalNOC = application?.finalNOC || null;
+  const departmentNOCs = Array.isArray(application?.departmentNOCs) ? application.departmentNOCs : [];
 
   const handleQueryResponse = async (departmentName) => {
     const responseText = String(queryResponses[departmentName] || "").trim();
@@ -354,6 +382,81 @@ const ApplicationTrackingPage = () => {
           </div>
         </div>
       </section>
+
+      {finalNOC ? (
+        <section className="rounded-[12px] border border-[#86EFAC] bg-[#F0FDF4] p-6">
+          <div className="flex flex-wrap items-start justify-between gap-4">
+            <div>
+              <h3 className="text-[18px] font-semibold text-[#166534]">Final Permit Issued</h3>
+              <p className="mt-1 text-sm text-[#166534]">Permit ID: {finalNOC.permitId}</p>
+              <p className="mt-1 text-sm text-[#166534]">
+                Issue Date: {formatDate(finalNOC.issueDate || application?.updatedAt)}
+              </p>
+              <div className="mt-3 flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={() => downloadFile(finalNOC.url, finalNOC.fileName)}
+                  className="rounded-md bg-[#166534] px-4 py-2 text-sm font-semibold text-white"
+                >
+                  Download Final NOC
+                </button>
+                <button
+                  type="button"
+                  onClick={() => window.open(finalNOC.url, "_blank", "noopener,noreferrer")}
+                  className="rounded-md border border-[#166534] px-4 py-2 text-sm font-semibold text-[#166534]"
+                >
+                  View Final NOC
+                </button>
+              </div>
+            </div>
+            <div className="rounded-lg border border-[#BBF7D0] bg-white p-3">
+              <p className="text-xs font-semibold text-[#166534]">Verification QR</p>
+              <img
+                src={`https://api.qrserver.com/v1/create-qr-code/?size=170x170&data=${encodeURIComponent(
+                  finalNOC.qrCode || finalNOC.url || ""
+                )}`}
+                alt="Final NOC Verification QR"
+                className="mt-2 h-[130px] w-[130px] rounded-md border border-[#DCFCE7]"
+              />
+            </div>
+          </div>
+        </section>
+      ) : null}
+
+      {departmentNOCs.length ? (
+        <section className="rounded-[12px] border border-gray-200 bg-white p-6">
+          <h3 className="text-[18px] font-semibold text-[#0F172A]">Department Clearances</h3>
+          <div className="mt-4 space-y-3">
+            {departmentNOCs.map((noc) => (
+              <div
+                key={`${noc.department}-${noc.timestamp}`}
+                className="rounded-[10px] border border-gray-200 p-4"
+              >
+                <p className="text-[15px] font-semibold text-[#0F172A]">{noc.department} Clearance</p>
+                <p className="mt-1 text-sm text-gray-500">
+                  Issued: {formatDate(noc.timestamp || application?.updatedAt)}
+                </p>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    onClick={() => window.open(noc.url, "_blank", "noopener,noreferrer")}
+                    className="rounded-md border border-[#1E40AF] px-3 py-1.5 text-sm font-semibold text-[#1E40AF]"
+                  >
+                    View NOC
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => downloadFile(noc.url, noc.fileName)}
+                    className="rounded-md bg-[#1E40AF] px-3 py-1.5 text-sm font-semibold text-white"
+                  >
+                    Download NOC
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </section>
+      ) : null}
 
       <section className="rounded-[12px] border border-gray-200 bg-white p-6">
         <h3 className="text-[18px] font-semibold text-[#0F172A]">Application Details</h3>

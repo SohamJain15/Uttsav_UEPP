@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react';
 import { getSlaMeta } from '../utils/sla';
 
 const toneClassMap = {
@@ -8,6 +9,15 @@ const toneClassMap = {
 };
 
 const SLAChip = ({ dueAt }) => {
+  const [, setTick] = useState(0);
+
+  useEffect(() => {
+    const intervalId = setInterval(() => {
+      setTick((value) => value + 1);
+    }, 30000);
+    return () => clearInterval(intervalId);
+  }, []);
+
   const slaMeta = getSlaMeta(dueAt);
 
   return (

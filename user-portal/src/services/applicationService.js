@@ -298,6 +298,36 @@ const normalizeApplicationDetail = (payload = {}) => {
     }
   });
 
+  const documents = Array.isArray(root?.documents)
+    ? root.documents.map((doc) => ({
+        id: doc.id || `${doc.file_name || "doc"}-${doc.uploaded_at || ""}`,
+        fileName: doc.file_name || "document",
+        url: doc.storage_url || "",
+        docType: doc.doc_type || "General",
+        uploadedAt: doc.uploaded_at || "",
+      }))
+    : [];
+
+  const departmentNOCs = Array.isArray(root?.department_nocs)
+    ? root.department_nocs.map((noc) => ({
+        department: noc.department || "Department",
+        url: noc.url || "",
+        fileName: noc.fileName || "Department-NOC.pdf",
+        timestamp: noc.timestamp || "",
+      }))
+    : [];
+
+  const finalNOC = root?.final_noc
+    ? {
+        permitId: root.final_noc.permitId || `UTTSAV-NOC-${application.app_id || ""}`,
+        applicationId: root.final_noc.applicationId || application.app_id || "",
+        url: root.final_noc.url || "",
+        fileName: root.final_noc.fileName || `NOC-FINAL-${application.app_id || "application"}.pdf`,
+        issueDate: root.final_noc.issueDate || "",
+        qrCode: root.final_noc.qrCode || "",
+      }
+    : null;
+
   return {
     id: application.app_id || payload?.id || "",
     eventName: event.name || "Unknown Event",
@@ -319,6 +349,9 @@ const normalizeApplicationDetail = (payload = {}) => {
     }, {}),
     queryByDepartment,
     rejectionReasonByDepartment,
+    documents,
+    departmentNOCs,
+    finalNOC,
   };
 };
 

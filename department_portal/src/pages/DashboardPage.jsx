@@ -10,6 +10,13 @@ import { useDepartmentData } from '../hooks/useDepartmentData';
 import { getDepartmentStatus, isDateToday, matchesApplicationSearch } from '../utils/application';
 import { getSlaMeta } from '../utils/sla';
 
+const priorityTone = {
+  Critical: 'bg-statusRed/10 text-statusRed border border-statusRed/35',
+  High: 'bg-statusYellow/10 text-statusYellow border border-statusYellow/35',
+  Medium: 'bg-primary/10 text-primary border border-primary/30',
+  Low: 'bg-statusGreen/10 text-statusGreen border border-statusGreen/35',
+};
+
 const DashboardPage = () => {
   const { user } = useAuth();
   const role = user?.role || '';
@@ -47,7 +54,14 @@ const DashboardPage = () => {
       return !['Approved', 'Rejected'].includes(status);
     })
     .filter((application) => matchesApplicationSearch(application, searchQuery))
-    .sort((a, b) => new Date(a.dueAt).getTime() - new Date(b.dueAt).getTime());
+    .sort((a, b) => {
+      const aSla = getSlaMeta(a.dueAt);
+      const bSla = getSlaMeta(b.dueAt);
+      if (aSla.priorityRank !== bSla.priorityRank) {
+        return aSla.priorityRank - bSla.priorityRank;
+      }
+      return new Date(a.dueAt).getTime() - new Date(b.dueAt).getTime();
+    });
 
   const highRiskCount = applications.filter((application) => application.riskLevel === 'High').length;
   const openQueryCount = applications.filter(
@@ -82,7 +96,7 @@ const DashboardPage = () => {
         <SummaryCard label="Rejected" value={stats.rejected} tone="rejected" />
       </section>
 
-      <section className="grid grid-cols-1 gap-4 xl:grid-cols-[1.7fr_1fr]">
+      <section className="grid grid-cols-1 gap-4 xl:grid-cols-[1.55fr_1.2fr]">
         <div className="rounded-2xl border border-borderMain bg-cardBg p-4 shadow-card">
           <div className="flex items-center justify-between gap-3">
             <h2 className="text-xl font-semibold text-textMain">Pending Applications</h2>
@@ -114,6 +128,13 @@ const DashboardPage = () => {
                       </p>
                     </div>
                     <div className="flex flex-wrap items-center gap-3">
+                      <span
+                        className={`rounded-xl px-2.5 py-1 text-xs font-semibold ${
+                          priorityTone[slaMeta.priority] ?? priorityTone.Medium
+                        }`}
+                      >
+                        {slaMeta.priority} Priority
+                      </span>
                       <RiskBadge riskLevel={application.riskLevel} />
                       <RiskBadge riskLevel={getDepartmentStatus(application, role)} isStatus />
                       <SLAChip dueAt={application.dueAt} />
