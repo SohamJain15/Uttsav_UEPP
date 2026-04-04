@@ -76,18 +76,15 @@ def _haversine_meters(lat1: float, lon1: float, lat2: float, lon2: float) -> flo
     return radius_km * c * 1000.0
 
 
-def _google_maps_key() -> str:
+def _google_maps_key() -> Optional[str]:
+    """Get Google Maps API key from environment variables"""
     key = (
         os.getenv("GOOGLE_MAPS_API_KEY")
         or os.getenv("GOOGLE_DIRECTIONS_API_KEY")
         or os.getenv("VITE_GOOGLE_MAPS_API_KEY")
         or ""
     ).strip()
-    if not key:
-        raise CollisionEngineError(
-            "Google Maps API key missing. Set GOOGLE_MAPS_API_KEY in backend environment."
-        )
-    return key
+    return key if key else None
 
 
 def _fetch_route_options(
@@ -96,12 +93,27 @@ def _fetch_route_options(
     mode: str = "walking",
     alternatives: bool = True,
 ) -> List[Dict[str, Any]]:
+    """Fetch route options from Google Maps or return fallback routes"""
+    api_key = _google_maps_key()
+    
+    # If no API key, return fallback single route
+    if not api_key:
+        return [{
+            "route_id": "R1",
+            "summary": f"{origin} to {destination}",
+            "total_distance": "Unknown",
+            "total_duration": "Unavailable",
+            "total_duration_seconds": 3600,  # Assume 1 hour default
+            "encoded_polyline": "",
+            "timeline": [],
+        }]
+    
     params = {
         "origin": origin,
         "destination": destination,
         "mode": mode,
         "alternatives": "true" if alternatives else "false",
-        "key": _google_maps_key(),
+        "key": api_key,
     }
     url = f"https://maps.googleapis.com/maps/api/directions/json?{urlencode(params)}"
 

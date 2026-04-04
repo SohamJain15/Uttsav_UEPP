@@ -41,7 +41,7 @@ export const authService = {
       throw new Error('Department username must start with P, T, FB, M, or A.');
     }
 
-    const loginResponse = await api.post('/api/auth/login', {
+    const loginResponse = await api.post('/api/user/login', {
       email: normalizedUsername,
       password,
     });

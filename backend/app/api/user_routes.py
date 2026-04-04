@@ -4,7 +4,7 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from app.core.auth import fetch_user_profile, first_row, get_current_user
+from app.core.auth import ensure_user_profile_exists, fetch_user_profile, first_row, get_current_user
 from app.core.database import db
 from app.models.schemas import (
     ApplicationSubmitRequest,
@@ -141,13 +141,14 @@ def _insert_application_with_schema_fallback(app_id: str, event_id: str, user_id
             "event_id": event_id,
             "status": "Pending",
             "submitted_at": now_iso,
-            "user_id": user_id,
+            "user_id": str(user_id),  # Ensure user_id is string UUID
         },
         {
             "app_id": app_id,
             "event_id": event_id,
             "status": "Submitted",
             "submitted_at": now_iso,
+            "user_id": str(user_id),  # Ensure user_id is string UUID
             "user_id": user_id,
         },
         {
@@ -209,64 +210,131 @@ def _insert_department_routings_with_fallback(app_id: str, departments: List[str
 
 
 def _fetch_user_application_rows(user_id: str) -> List[Dict[str, Any]]:
-    query_candidates = [
-        (
-            "app_id, status, submitted_at, events!inner(organizer_id, name, category, venue_type, expected_crowd, start_time, raw_address)",
-            ("events.organizer_id", user_id),
-        ),
-        (
-            "app_id, status, submitted_at, events!inner(organizer_id, name, category, expected_crowd, start_time, raw_address)",
-            ("events.organizer_id", user_id),
-        ),
-        (
-            "app_id, status, submitted_at, user_id, events(name, category, venue_type, expected_crowd, start_time, raw_address)",
-            ("user_id", user_id),
-        ),
-        (
-            "app_id, status, submitted_at, user_id, events(name, category, expected_crowd, start_time, raw_address)",
-            ("user_id", user_id),
-        ),
-    ]
-
-    for select_clause, (filter_key, filter_value) in query_candidates:
-        try:
-            query = db.table("applications").select(select_clause).order("submitted_at", desc=True)
-            query = query.eq(filter_key, filter_value)
-            response = query.execute()
-            if response.data:
-                return response.data
-        except Exception:
-            continue
+    """Fetch applications for a user, handling multiple schema variations"""
+    # Primary query: fetch applications directly owned by user
+    try:
+        response = (
+            db.table("applications")
+            .select(
+                "app_id, status, submitted_at, events!inner(id, organizer_id, name, category, venue_type, expected_crowd, start_time, raw_address)"
+            )
+            .eq("user_id", user_id)
+            .order("submitted_at", desc=True)
+            .execute()
+        )
+        if response.data:
+            return response.data
+    except Exception:
+        pass
+    
+    # Fallback: fetch applications via event organizer (user created the event)
+    try:
+        response = (
+            db.table("applications")
+            .select(
+                "app_id, status, submitted_at, events!inner(id, organizer_id, name, category, expected_crowd, start_time, raw_address)"
+            )
+            .execute()
+        )
+        # Filter client-side for events where organizer_id matches
+        filtered = []
+        for app in response.data or []:
+            event = app.get("events") or {}
+            if isinstance(event, list) and event:
+                event = event[0]
+            if event.get("organizer_id") == user_id:
+                filtered.append(app)
+        if filtered:
+            return filtered
+    except Exception:
+        pass
+    
     return []
 
 
 def _application_with_event(app_id: str) -> Dict[str, Any]:
-    application_response = (
-        db.table("applications").select("*").eq("app_id", app_id).limit(1).execute()
-    )
-    application = first_row(application_response.data)
-    if not application:
-        raise HTTPException(status_code=404, detail="Application not found")
+    """Fetch complete application with event and routing details"""
+    try:
+        application_response = (
+            db.table("applications")
+            .select("*")
+            .eq("app_id", app_id)
+            .limit(1)
+            .execute()
+        )
+        application = first_row(application_response.data)
+        if not application:
+            raise HTTPException(status_code=404, detail="Application not found")
 
-    event = None
-    event_id = application.get("event_id")
-    if event_id:
-        event_response = db.table("events").select("*").eq("id", event_id).limit(1).execute()
-        event = first_row(event_response.data)
+        event = None
+        event_id = application.get("event_id")
+        if event_id:
+            try:
+                event_response = (
+                    db.table("events")
+                    .select("*")
+                    .eq("id", event_id)
+                    .limit(1)
+                    .execute()
+                )
+                event = first_row(event_response.data)
+            except Exception as e:
+                print(f"Warning: Could not fetch event {event_id}: {e}")
 
-    routing_response = (
-        db.table("department_routings")
-        .select("*")
-        .eq("app_id", app_id)
-        .order("updated_at", desc=True)
-        .execute()
-    )
+        # Fetch department routings
+        try:
+            routing_response = (
+                db.table("department_routings")
+                .select("*")
+                .eq("app_id", app_id)
+                .order("updated_at", desc=True)
+                .execute()
+            )
+            department_routings = routing_response.data or []
+        except Exception as e:
+            print(f"Warning: Could not fetch department routings: {e}")
+            department_routings = []
 
-    return {
-        "application": application,
-        "event": event,
-        "department_routings": routing_response.data or [],
-    }
+        # Fetch documents
+        try:
+            documents_response = (
+                db.table("documents")
+                .select("*")
+                .eq("app_id", app_id)
+                .execute()
+            )
+            documents = documents_response.data or []
+        except Exception as e:
+            print(f"Warning: Could not fetch documents: {e}")
+            documents = []
+
+        # Fetch AI intelligence logs if exists
+        try:
+            ai_logs_response = (
+                db.table("ai_intelligence_logs")
+                .select("*")
+                .eq("app_id", app_id)
+                .limit(1)
+                .execute()
+            )
+            ai_logs = first_row(ai_logs_response.data)
+        except Exception:
+            ai_logs = None
+
+        return {
+            "application": application,
+            "event": event,
+            "department_routings": department_routings,
+            "documents": documents,
+            "ai_logs": ai_logs,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to fetch application details: {str(exc)}"
+        ) from exc
 
 
 def _assert_application_owner(payload: Dict[str, Any], user_id: str) -> None:
@@ -287,10 +355,17 @@ async def signup(credentials: UserCredentials):
                 "email_confirm": True,
             }
         )
+        user = response.user
+        user_dict = _user_public_dict(user)
+        
+        # Ensure user profile exists in users table
+        if user and user.id:
+            ensure_user_profile_exists(str(user.id), credentials.email, {})
+        
         return {
             "status": "success",
             "message": "User created successfully",
-            "user": _user_public_dict(response.user),
+            "user": user_dict,
         }
     except Exception as exc:
         raise HTTPException(status_code=400, detail=_error_detail(exc, "Signup failed")) from exc

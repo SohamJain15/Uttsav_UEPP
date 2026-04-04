@@ -1,12 +1,20 @@
+from supabase import create_client
+
 from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 
 from app.core.auth import fetch_user_profile, first_row, get_current_user
-from app.core.database import db
+from app.core.database import SUPABASE_SERVICE_ROLE_KEY, SUPABASE_URL, db
 from app.models.schemas import AuthRegisterRequest, UserCredentials, UserProfileUpdateRequest
 
 router = APIRouter()
+
+
+def _new_auth_client():
+    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
+        raise HTTPException(status_code=500, detail="Supabase auth client is not configured.")
+    return create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
 
 def _error_detail(exc: Exception, fallback: str) -> str:
@@ -252,9 +260,9 @@ async def register_user(payload: AuthRegisterRequest):
         else:
             username = ""
             
-        # FIX: Swapped admin.create_user to standard db.auth.sign_up
-        # This properly formats the metadata payload and works with standard anon keys
-        auth_response = db.auth.sign_up(
+        # Use isolated auth client so global service-role DB session is not mutated.
+        auth_client = _new_auth_client()
+        auth_response = auth_client.auth.sign_up(
             {
                 "email": payload.email,
                 "password": payload.password,
@@ -306,7 +314,8 @@ async def register_user(payload: AuthRegisterRequest):
 async def login_user(credentials: UserCredentials):
     try:
         login_email = _resolve_login_email(credentials.email)
-        response = db.auth.sign_in_with_password(
+        auth_client = _new_auth_client()
+        response = auth_client.auth.sign_in_with_password(
             {"email": login_email, "password": credentials.password}
         )
         session = getattr(response, "session", None)
