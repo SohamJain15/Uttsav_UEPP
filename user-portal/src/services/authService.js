@@ -25,7 +25,14 @@ const normalizeAuthPayload = (data = {}) => {
 export const authService = {
   async login(payload) {
     const response = await api.post("/api/auth/login", payload);
-    return normalizeAuthPayload(response.data);
+    const normalizedData = normalizeAuthPayload(response.data);
+
+    // FIX: Actively store the token so the api.js interceptor can attach it to future requests
+    if (normalizedData.access_token) {
+      localStorage.setItem("uttsav_auth", JSON.stringify(normalizedData));
+    }
+
+    return normalizedData;
   },
 
   async register(payload) {
@@ -45,4 +52,8 @@ export const authService = {
     const response = await api.get("/api/user/profile");
     return response.data?.profile || response.data?.user || null;
   },
+
+  logout() {
+    localStorage.removeItem("uttsav_auth");
+  }
 };

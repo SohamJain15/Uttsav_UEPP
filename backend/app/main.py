@@ -8,10 +8,17 @@ from app.api.user_routes import router as user_router
 
 app = FastAPI(title="Uttsav UEPP API", version="1.0.0")
 
+# FIXED: Replaced "*" with explicit localhost origins to allow credentials securely 
+# preventing blocked CORS requests during login from the frontend.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
+    allow_origins=[
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://localhost:5174",
+        "http://127.0.0.1:5174"
+    ],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )

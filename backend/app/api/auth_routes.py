@@ -99,7 +99,8 @@ def _resolve_login_email(identifier: str) -> str:
     if not username_department:
         raise HTTPException(
             status_code=400,
-            detail="Department username must start with P, T, FB, or M.",
+            # FIXED: Updated the error message to include A (Admin) and U (Organizer)
+            detail="Department username must start with P, T, FB, M, A, or U.",
         )
 
     candidates = [username]
@@ -110,7 +111,8 @@ def _resolve_login_email(identifier: str) -> str:
     selected_user = None
     for candidate in candidates:
         try:
-            query = db.table("users").select("email, role, prefix").eq("prefix", candidate).limit(1).execute()
+            # FIXED: Changed .eq to .ilike for case-insensitive username matching
+            query = db.table("users").select("email, role, prefix").ilike("prefix", candidate).limit(1).execute()
             row = first_row(query.data)
             if row:
                 selected_user = row
@@ -186,7 +188,6 @@ def _user_payload_candidates(user_id: str, email: str, payload: Dict[str, Any]) 
     department = _normalize_department(payload.get("department"))
     username = _normalize_username(payload.get("username") or _generate_username(user_id, department))
     return [
-        # Candidate for current Supabase schema shared by user.
         {
             "id": user_id,
             "email": email,
@@ -197,7 +198,6 @@ def _user_payload_candidates(user_id: str, email: str, payload: Dict[str, Any]) 
             "prefix": username,
             "is_active": True,
         },
-        # Backward-compatible candidate for previous project schema.
         {
             "id": user_id,
             "email": email,
@@ -206,7 +206,6 @@ def _user_payload_candidates(user_id: str, email: str, payload: Dict[str, Any]) 
             "organization": payload.get("organization"),
             "department": department,
         },
-        # Minimal fallback.
         {
             "id": user_id,
             "email": email,
@@ -252,21 +251,26 @@ async def register_user(payload: AuthRegisterRequest):
                 )
         else:
             username = ""
-        auth_response = db.auth.admin.create_user(
+            
+        # FIX: Swapped admin.create_user to standard db.auth.sign_up
+        # This properly formats the metadata payload and works with standard anon keys
+        auth_response = db.auth.sign_up(
             {
                 "email": payload.email,
                 "password": payload.password,
-                "email_confirm": True,
-                "user_metadata": {
-                    "full_name": payload.full_name,
-                    "phone_number": payload.phone_number,
-                    "organization": payload.organization,
-                    "department": department,
-                    "role": department,
-                    "username": username or None,
-                },
+                "options": {
+                    "data": {
+                        "full_name": payload.full_name,
+                        "phone_number": payload.phone_number,
+                        "organization": payload.organization,
+                        "department": department,
+                        "role": department,
+                        "username": username or None,
+                    }
+                }
             }
         )
+        
         created_user = _serialize_user(getattr(auth_response, "user", None))
         user_id = created_user.get("id")
         if not user_id:
@@ -293,7 +297,9 @@ async def register_user(payload: AuthRegisterRequest):
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(status_code=400, detail=_error_detail(exc, "Registration failed")) from exc
+        # Improved error extraction so if Supabase rejects a bad password, the frontend sees exactly why
+        error_msg = str(getattr(exc, "message", None) or exc)
+        raise HTTPException(status_code=400, detail=f"Registration failed: {error_msg}") from exc
 
 
 @router.post("/api/auth/login")

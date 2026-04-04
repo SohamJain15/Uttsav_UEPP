@@ -28,20 +28,24 @@ export const authService = {
   async login({ username, password }) {
     const normalizedUsername = String(username || '').trim().toUpperCase();
     const usernameWithoutDash = normalizedUsername.replace('-', '');
+    
+    // FIX 1: Added 'A' to the valid prefixes for Admin support
     const startsWithValidPrefix =
       usernameWithoutDash.startsWith('P') ||
       usernameWithoutDash.startsWith('T') ||
       usernameWithoutDash.startsWith('FB') ||
-      usernameWithoutDash.startsWith('M');
+      usernameWithoutDash.startsWith('M') ||
+      usernameWithoutDash.startsWith('A');
 
     if (!startsWithValidPrefix) {
-      throw new Error('Department username must start with P, T, FB, or M.');
+      throw new Error('Department username must start with P, T, FB, M, or A.');
     }
 
     const loginResponse = await api.post('/api/auth/login', {
       email: normalizedUsername,
       password,
     });
+    
     const accessToken =
       loginResponse?.access_token ||
       loginResponse?.token ||
@@ -52,18 +56,31 @@ export const authService = {
       throw new Error('Login failed: access token was not returned.');
     }
 
+    // FIX 2: Actively store the token in localStorage BEFORE making the profile request
+    // This allows api.js to successfully read the token and attach the Bearer header
+    const initialAuthData = {
+      access_token: accessToken,
+      token_type: loginResponse?.token_type || 'bearer',
+      user: loginResponse?.user || {},
+      profile: loginResponse?.profile || {}
+    };
+    localStorage.setItem('uttsav_department_auth', JSON.stringify(initialAuthData));
+
+    // Now this request will succeed because the token is stored
     const profileResponse = await api.get('/api/user/profile');
     const profile = profileResponse?.profile || loginResponse?.profile || {};
     const user = profileResponse?.user || loginResponse?.user || {};
     const role = extractRole({ profile, user });
 
     if (!role) {
+      // Clean up storage if the user doesn't have valid department permissions
+      localStorage.removeItem('uttsav_department_auth');
       throw new Error(
         'Your account does not have a valid department role. Set department to Police, Fire, Traffic, Municipality, or Admin.'
       );
     }
 
-    return {
+    const finalAuthData = {
       access_token: accessToken,
       token_type: loginResponse?.token_type || 'bearer',
       user: {
@@ -76,5 +93,14 @@ export const authService = {
         departmentLabel: ROLE_LABELS[role] || role,
       },
     };
+
+    // FIX 3: Update storage with the fully resolved profile and role
+    localStorage.setItem('uttsav_department_auth', JSON.stringify(finalAuthData));
+
+    return finalAuthData;
   },
+  
+  logout() {
+    localStorage.removeItem('uttsav_department_auth');
+  }
 };
