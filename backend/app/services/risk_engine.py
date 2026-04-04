@@ -4,6 +4,7 @@ import asyncio
 import concurrent.futures
 import json
 import os
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -35,6 +36,22 @@ OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434").rstrip(
 OLLAMA_MODEL = "tinyllama"
 OLLAMA_TIMEOUT_SECONDS = 20
 RECOMMENDATION_FALLBACK = "Deploy additional crowd marshals and maintain emergency access routes."
+LEGACY_CONTEXT_TERMS = (
+    "covid",
+    "covid-19",
+    "pandemic",
+    "lockdown",
+    "quarantine",
+    "containment zone",
+    "social distancing",
+    "vaccination",
+)
+LOW_QUALITY_MARKERS = (
+    "sir/madam",
+    "i hope",
+    "all the best",
+    "safe and enjoyable for everyone",
+)
 
 
 def _resolve_model_dir() -> Path:
@@ -202,6 +219,94 @@ def _build_factors_string(top_factors: List[Dict[str, Any]]) -> str:
     )
 
 
+def _split_sentences(text: str) -> List[str]:
+    cleaned = " ".join(str(text or "").split()).strip()
+    if not cleaned:
+        return []
+    parts = [item.strip() for item in re.split(r"(?<=[.!?])\s+", cleaned) if item.strip()]
+    return parts
+
+
+def _contains_legacy_context(text: str) -> bool:
+    lowered = str(text or "").lower()
+    return any(term in lowered for term in LEGACY_CONTEXT_TERMS)
+
+
+def _looks_low_quality(text: str) -> bool:
+    lowered = str(text or "").lower()
+    if not lowered:
+        return True
+    if any(marker in lowered for marker in LOW_QUALITY_MARKERS):
+        return True
+    if len(lowered) > 420:
+        return True
+    return False
+
+
+def _factor_action(feature_name: str) -> str:
+    lowered = str(feature_name or "").lower()
+    if any(token in lowered for token in ("crowd density", "expected crowd", "crowd")):
+        return "cap live attendance by phased entry and deploy barricaded holding queues at gates"
+    if any(token in lowered for token in ("capacity utilization", "max venue capacity", "capacity")):
+        return "restrict admissions to safe occupancy and enforce real-time headcount monitoring"
+    if any(token in lowered for token in ("people per exit", "fire exits", "exit")):
+        return "open additional egress routes and keep all emergency exits unobstructed with marshals"
+    if any(token in lowered for token in ("road closure", "traffic", "moving procession")):
+        return "execute traffic diversion with police coordination and preserve a dedicated ambulance lane"
+    if any(token in lowered for token in ("fireworks", "fire")):
+        return "stage licensed fire-safety supervision with extinguishers and controlled ignition perimeter"
+    if any(token in lowered for token in ("temp structures", "temporary", "stage")):
+        return "complete structural and electrical safety inspection before public entry"
+    if any(token in lowered for token in ("loudspeaker", "noise")):
+        return "enforce permitted sound window and on-ground decibel checks"
+    if any(token in lowered for token in ("food stalls", "liquor")):
+        return "run stall-zone safety inspections with clear fire and hygiene controls"
+    return "increase field supervision and maintain clear emergency response routes"
+
+
+def _deterministic_recommendation(risk_level: str, top_factors: List[Dict[str, Any]]) -> str:
+    level = str(risk_level or "Medium").strip().capitalize()
+    factors = [str(item.get("feature") or "").strip() for item in (top_factors or []) if item.get("feature")]
+    top = factors[:3]
+    fallback_factor_labels = ["Crowd conditions", "Venue capacity", "Exit readiness"]
+    for label in fallback_factor_labels:
+        if len(top) >= 3:
+            break
+        if label not in top:
+            top.append(label)
+    actions = [_factor_action(name) for name in top]
+    ordered_actions: List[str] = []
+    for action in actions:
+        if action not in ordered_actions:
+            ordered_actions.append(action)
+    while len(ordered_actions) < 2:
+        ordered_actions.append("increase field supervision and maintain clear emergency response routes")
+
+    sentence_one = (
+        f"Risk level is {level}, primarily driven by {top[0]}, {top[1]}, and {top[2]}."
+    )
+    sentence_two = (
+        f"Immediately {ordered_actions[0]}, and {ordered_actions[1]}."
+    )
+    return f"{sentence_one} {sentence_two}"
+
+
+def _normalize_recommendation_text(text: str, risk_level: str, top_factors: List[Dict[str, Any]]) -> str:
+    deterministic = _deterministic_recommendation(risk_level, top_factors)
+    if _contains_legacy_context(text) or _looks_low_quality(text):
+        return deterministic
+
+    sentences = _split_sentences(text)
+    if not sentences:
+        return deterministic
+    trimmed = " ".join(sentences[:2]).strip()
+    if not trimmed.endswith((".", "!", "?")):
+        trimmed = f"{trimmed}."
+    if len(_split_sentences(trimmed)) < 2:
+        return deterministic
+    return trimmed
+
+
 def _post_json_sync(url: str, payload: Dict[str, Any], timeout_seconds: int) -> Dict[str, Any]:
     body = json.dumps(payload).encode("utf-8")
     request = Request(
@@ -234,16 +339,20 @@ def _post_json_sync(url: str, payload: Dict[str, Any], timeout_seconds: int) -> 
 async def _generate_precaution_with_ollama(risk_level: str, top_factors: List[Dict[str, Any]]) -> str:
     factors_string = _build_factors_string(top_factors)
     prompt = (
-        "You are an AI safety officer. "
+        "You are an AI safety officer writing for government event officials in India for year 2026. "
         f"A predictive model flagged a public event with a {risk_level} risk level. "
         f"The top contributing factors are: {factors_string}. "
-        "Write a strict, 2-sentence actionable recommendation for government officials to mitigate this risk. "
-        "Do not use pleasantries."
+        "Write exactly 2 strict actionable sentences to mitigate this risk. "
+        "Do not use pleasantries, greetings, or generic disclaimers. "
+        "Do not mention COVID-19, pandemic, lockdown, quarantine, or vaccination unless those terms are explicitly present in the listed factors."
     )
     payload = {
         "model": OLLAMA_MODEL,
         "prompt": prompt,
         "stream": False,
+        "options": {
+            "temperature": 0.2,
+        },
     }
     try:
         response = await asyncio.to_thread(
@@ -413,7 +522,8 @@ def analyze_risk(payload: Dict[str, Any]) -> Dict[str, Any]:
             confidence = float(np.max(probabilities) * 100.0)
 
         top_factors = _extract_top_factors(assets, transformed_input, predicted_class)
-        recommendation = _run_async(_generate_precaution_with_ollama(predicted_class, top_factors))
+        raw_recommendation = _run_async(_generate_precaution_with_ollama(predicted_class, top_factors))
+        recommendation = _normalize_recommendation_text(raw_recommendation, predicted_class, top_factors)
 
         return {
             "status": "success",

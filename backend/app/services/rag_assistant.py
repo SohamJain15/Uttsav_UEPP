@@ -46,6 +46,16 @@ BLOCKED_INTENT_MARKERS = (
     "bribe",
     "how to cheat",
 )
+LEGACY_CONTEXT_TERMS = (
+    "covid",
+    "covid-19",
+    "pandemic",
+    "lockdown",
+    "quarantine",
+    "containment zone",
+    "social distancing",
+    "vaccination",
+)
 
 AREA_PATTERNS = (
     r"(\d+(?:\.\d+)?)\s*(?:square\s*meters?|sqm|sq\.?\s*m(?:eters?)?|m2)\b",
@@ -615,6 +625,22 @@ def _looks_like_prompt_echo(answer: str) -> bool:
     return False
 
 
+def _contains_legacy_context(answer: str) -> bool:
+    lowered = _normalize_text(answer).lower()
+    return any(term in lowered for term in LEGACY_CONTEXT_TERMS)
+
+
+def _legacy_context_is_expected(question: str, matched_rules: List[Dict[str, Any]]) -> bool:
+    q_lower = _normalize_text(question).lower()
+    if any(term in q_lower for term in LEGACY_CONTEXT_TERMS):
+        return True
+    for rule in matched_rules:
+        content = _normalize_text(rule.get("content")).lower()
+        if any(term in content for term in LEGACY_CONTEXT_TERMS):
+            return True
+    return False
+
+
 def _run_async(coro: Any) -> Any:
     try:
         asyncio.get_running_loop()
@@ -689,6 +715,9 @@ def answer_assistant_query(payload: Dict[str, Any]) -> Dict[str, Any]:
         answer = _fallback_answer(matched_rules)
 
     if _looks_like_prompt_echo(answer):
+        answer = rule_based or _fallback_answer(matched_rules)
+
+    if _contains_legacy_context(answer) and not _legacy_context_is_expected(question, matched_rules):
         answer = rule_based or _fallback_answer(matched_rules)
 
     if rule_based:

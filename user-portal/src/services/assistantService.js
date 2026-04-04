@@ -1,5 +1,7 @@
 import axios from "axios";
 
+const ASSISTANT_REQUEST_TIMEOUT_MS = Number(import.meta.env.VITE_ASSISTANT_TIMEOUT_MS || 45000);
+
 const buildAssistantApiCandidates = () => {
   const explicitOrigin = (import.meta.env.VITE_BACKEND_ORIGIN || "").trim().replace(/\/$/, "");
   const candidates = [];
@@ -45,7 +47,7 @@ export const assistantService = {
       try {
         const response = await axios.post(endpoint, payload, {
           headers: { "Content-Type": "application/json" },
-          timeout: 12000,
+          timeout: ASSISTANT_REQUEST_TIMEOUT_MS,
         });
         return normalizeAssistantResponse(response.data);
       } catch (error) {
