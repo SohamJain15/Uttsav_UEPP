@@ -46,6 +46,51 @@ async def get_current_user(authorization: Optional[str] = Header(default=None)) 
     if not token:
         raise HTTPException(status_code=401, detail="Missing bearer token")
 
+    if token.startswith("department::"):
+        parts = token.split("::")
+        if len(parts) == 3:
+            user_id, role = parts[1], parts[2]
+            email = None
+        elif len(parts) == 4:
+            user_id, email, role = parts[1], parts[2], parts[3]
+        else:
+            raise HTTPException(status_code=401, detail="Invalid department authentication token")
+
+        if not user_id or not role:
+            raise HTTPException(status_code=401, detail="Invalid department authentication token")
+
+        try:
+            query = db.table("users").select("*").eq("id", user_id).eq("role", role)
+            if email:
+                query = query.eq("email", email)
+            response = query.limit(1).execute()
+            profile = first_row(response.data)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=401,
+                detail=f"Invalid or expired authentication token: {str(exc)}",
+            ) from exc
+
+        if not profile:
+            raise HTTPException(status_code=401, detail="Authenticated user not found")
+
+        department = profile.get("role") or role
+        return {
+            "token": token,
+            "user": {
+                "id": profile.get("id"),
+                "email": profile.get("email"),
+                "phone": profile.get("phone"),
+                "user_metadata": {
+                    "department": department,
+                    "role": department,
+                    "username": profile.get("username"),
+                    "full_name": profile.get("name"),
+                },
+                "app_metadata": {},
+            },
+        }
+
     try:
         response = db.auth.get_user(token)
         user_data = _serialize_user(getattr(response, "user", None))
@@ -64,7 +109,13 @@ async def get_current_user(authorization: Optional[str] = Header(default=None)) 
 def fetch_user_profile(user_id: str) -> Optional[Dict[str, Any]]:
     """Fetch extended user profile from users table"""
     try:
-        response = db.table("users").select("*").eq("id", user_id).limit(1).execute()
+        response = (
+            db.table("users")
+            .select("id, name, email, phone, role, is_verified, created_at")
+            .eq("id", user_id)
+            .limit(1)
+            .execute()
+        )
         return first_row(response.data)
     except Exception:
         return None
@@ -81,10 +132,9 @@ def ensure_user_profile_exists(user_id: str, email: str, metadata: Dict[str, Any
             "id": user_id,
             "email": email,
             "name": metadata.get("full_name", email.split("@")[0]) if metadata else email.split("@")[0],
-            "phone": metadata.get("phone_number", "") if metadata else "",
-            "organization_type": metadata.get("organization") if metadata else None,
+            "phone": metadata.get("phone_number") if metadata and metadata.get("phone_number") else f"NA-{user_id[:12]}",
             "role": "Organizer",  # Default role
-            "is_active": True,
+            "is_verified": False,
         }
         
         response = db.table("users").insert(profile_data).execute()
@@ -92,4 +142,3 @@ def ensure_user_profile_exists(user_id: str, email: str, metadata: Dict[str, Any
     except Exception as e:
         # User profile might already exist, return what we can
         return {"id": user_id, "email": email, "name": email.split("@")[0]}
-

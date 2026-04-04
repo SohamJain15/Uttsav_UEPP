@@ -11,7 +11,9 @@ const getStoredToken = () => {
   }
 };
 
-const backendOrigin = (import.meta.env.VITE_BACKEND_ORIGIN || '').trim().replace(/\/$/, '');
+const backendOrigin = (
+  import.meta.env.VITE_BACKEND_ORIGIN || 'http://localhost:8001'
+).trim().replace(/\/$/, '');
 
 const toUrl = (path) => {
   if (String(path).startsWith('http://') || String(path).startsWith('https://')) {

@@ -16,7 +16,9 @@ const getStoredToken = () => {
   }
 };
 
-const backendOrigin = (import.meta.env.VITE_BACKEND_ORIGIN || "").trim().replace(/\/$/, "");
+const backendOrigin = (
+  import.meta.env.VITE_BACKEND_ORIGIN || "http://localhost:8000"
+).trim().replace(/\/$/, "");
 
 const api = axios.create({
   baseURL: backendOrigin || "",

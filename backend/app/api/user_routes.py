@@ -1,8 +1,9 @@
 import uuid
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.encoders import jsonable_encoder
 
 from app.core.auth import ensure_user_profile_exists, fetch_user_profile, first_row, get_current_user
 from app.core.database import db
@@ -10,6 +11,7 @@ from app.models.schemas import (
     ApplicationSubmitRequest,
     ApprovalProbabilityRequest,
     AssistantQueryRequest,
+    RespondQueryRequest,
     RiskAnalysisRequest,
     RouteCollisionRequest,
     UserCredentials,
@@ -45,6 +47,10 @@ def _payload_to_dict(payload: Any) -> Dict[str, Any]:
     if hasattr(payload, "model_dump"):
         return payload.model_dump(exclude_none=True)
     return payload.dict(exclude_none=True)
+
+
+def _json_ready(payload: Any) -> Any:
+    return jsonable_encoder(payload, exclude_none=True)
 
 
 def _normalize_department_status(raw_status: Any) -> str:
@@ -108,21 +114,14 @@ def _insert_event_with_schema_fallback(
         "is_moving_procession": payload.is_moving_procession,
     }
     payload_candidates = [
-        {
-            **common,
-            "venue_name": payload.venue_name,
-            "venue_type": payload.venue_type,
-            "venue_ownership": payload.venue_ownership,
-        },
         {**common},
-        # Legacy fallback if organizer_id is absent in schema.
         {k: v for k, v in common.items() if k != "organizer_id"},
     ]
 
     last_error: Optional[Exception] = None
     for candidate in payload_candidates:
         try:
-            db.table("events").insert(candidate).execute()
+            db.table("events").insert(_json_ready(candidate)).execute()
             return
         except Exception as exc:
             last_error = exc
@@ -134,7 +133,7 @@ def _insert_event_with_schema_fallback(
 
 
 def _insert_application_with_schema_fallback(app_id: str, event_id: str, user_id: str) -> None:
-    now_iso = datetime.utcnow().isoformat()
+    now_iso = datetime.now(UTC).isoformat()
     payload_candidates = [
         {
             "app_id": app_id,
@@ -166,7 +165,7 @@ def _insert_application_with_schema_fallback(app_id: str, event_id: str, user_id
     last_error: Optional[Exception] = None
     for candidate in payload_candidates:
         try:
-            db.table("applications").insert(candidate).execute()
+            db.table("applications").insert(_json_ready(candidate)).execute()
             return
         except Exception as exc:
             last_error = exc
@@ -181,7 +180,12 @@ def _insert_department_routings_with_fallback(app_id: str, departments: List[str
     # Fast path for schemas that accept canonical department values.
     try:
         db.table("department_routings").insert(
-            [{"app_id": app_id, "department": department, "status": "Pending"} for department in departments]
+            _json_ready(
+                [
+                    {"app_id": app_id, "department": department, "status": "Pending"}
+                    for department in departments
+                ]
+            )
         ).execute()
         return
     except Exception:
@@ -195,7 +199,7 @@ def _insert_department_routings_with_fallback(app_id: str, departments: List[str
                 {"app_id": app_id, "department": department_candidate},
             ):
                 try:
-                    db.table("department_routings").insert(candidate).execute()
+                    db.table("department_routings").insert(_json_ready(candidate)).execute()
                     inserted = True
                     break
                 except Exception:
@@ -216,7 +220,7 @@ def _fetch_user_application_rows(user_id: str) -> List[Dict[str, Any]]:
         response = (
             db.table("applications")
             .select(
-                "app_id, status, submitted_at, events!inner(id, organizer_id, name, category, venue_type, expected_crowd, start_time, raw_address)"
+                "app_id, status, submitted_at, events!inner(id, organizer_id, name, category, expected_crowd, start_time, raw_address)"
             )
             .eq("user_id", user_id)
             .order("submitted_at", desc=True)
@@ -321,12 +325,29 @@ def _application_with_event(app_id: str) -> Dict[str, Any]:
         except Exception:
             ai_logs = None
 
+        query_rows = []
+        routing_ids = [row.get("id") for row in department_routings if row.get("id")]
+        if routing_ids:
+            try:
+                query_rows = (
+                    db.table("official_queries")
+                    .select("id, routing_id, query_text, organizer_response, is_resolved, created_at")
+                    .in_("routing_id", routing_ids)
+                    .order("created_at", desc=True)
+                    .execute()
+                    .data
+                    or []
+                )
+            except Exception:
+                query_rows = []
+
         return {
             "application": application,
             "event": event,
             "department_routings": department_routings,
             "documents": documents,
             "ai_logs": ai_logs,
+            "official_queries": query_rows,
         }
     except HTTPException:
         raise
@@ -343,6 +364,60 @@ def _assert_application_owner(payload: Dict[str, Any], user_id: str) -> None:
     owner_id = application.get("user_id") or event.get("organizer_id")
     if owner_id and str(owner_id) != str(user_id):
         raise HTTPException(status_code=403, detail="You are not allowed to access this application")
+
+
+def _fetch_single_application_row(app_id: str) -> Dict[str, Any]:
+    response = (
+        db.table("applications")
+        .select("app_id, event_id, user_id, status, submitted_at, created_at")
+        .eq("app_id", app_id)
+        .limit(1)
+        .execute()
+    )
+    row = first_row(response.data)
+    if not row:
+        raise HTTPException(status_code=404, detail="Application not found")
+    return row
+
+
+def _calculate_weighted_risk_score(event: Dict[str, Any]) -> Dict[str, Any]:
+    crowd_size = max(int(event.get("expected_crowd") or 0), 0)
+    start_time = datetime.fromisoformat(str(event.get("start_time")).replace("Z", "+00:00"))
+    end_time = datetime.fromisoformat(str(event.get("end_time")).replace("Z", "+00:00"))
+    duration_hours = max((end_time - start_time).total_seconds() / 3600.0, 1.0)
+
+    crowd_component = min((crowd_size / 20000.0) * 100.0, 100.0)
+    exit_component = 70.0 if crowd_size >= 5000 else 45.0 if crowd_size >= 1000 else 20.0
+    capacity_component = min((crowd_size / 5000.0) * 100.0, 100.0)
+    duration_component = min((duration_hours / 12.0) * 100.0, 100.0)
+
+    score = (
+        0.35 * crowd_component
+        + 0.30 * exit_component
+        + 0.20 * capacity_component
+        + 0.15 * duration_component
+    )
+
+    if crowd_size > 20000:
+        score += 10
+    if start_time.hour >= 20 or start_time.hour <= 5:
+        score += 8
+    if str(event.get("category") or "").strip().lower() in {"indoor", "temporary indoor"}:
+        score += 7
+
+    score = int(round(min(score, 100)))
+    risk_level = "High" if score >= 70 else "Medium" if score >= 40 else "Low"
+    return {
+        "status": "success",
+        "risk_score": score,
+        "risk_level": risk_level,
+        "weights": {
+            "crowd_density": 35,
+            "fire_exit_ratio": 30,
+            "capacity": 20,
+            "duration": 15,
+        },
+    }
 
 
 @router.post("/signup")
@@ -453,6 +528,107 @@ async def check_application_route_collision(payload: RouteCollisionRequest):
     return await check_route_collision(payload)
 
 
+@router.get("/risk-score/{app_id}")
+async def get_application_risk_score(app_id: str, current=Depends(get_current_user)):
+    application = _fetch_single_application_row(app_id)
+    if str(application.get("user_id") or "") != str(current["user"]["id"]):
+        raise HTTPException(status_code=403, detail="You are not allowed to access this application")
+
+    if not application.get("event_id"):
+        raise HTTPException(status_code=404, detail="Linked event not found for this application")
+
+    event_response = (
+        db.table("events")
+        .select("id, name, category, expected_crowd, start_time, end_time, latitude, longitude, pincode")
+        .eq("id", application["event_id"])
+        .limit(1)
+        .execute()
+    )
+    event = first_row(event_response.data)
+    if not event:
+        raise HTTPException(status_code=404, detail="Event not found")
+
+    score_payload = _calculate_weighted_risk_score(event)
+    try:
+        db.table("ai_intelligence_logs").upsert(
+            _json_ready(
+                {
+                    "app_id": app_id,
+                    "numerical_risk_score": score_payload["risk_score"],
+                    "capacity_utilization": min(int(event.get("expected_crowd") or 0), 100),
+                    "exit_safety_rating": score_payload["risk_level"],
+                }
+            )
+        ).execute()
+    except Exception:
+        pass
+
+    return {
+        **score_payload,
+        "app_id": app_id,
+        "event_name": event.get("name"),
+    }
+
+
+@router.get("/detect-collision")
+async def detect_collision(event_id: str = Query(..., min_length=1), current=Depends(get_current_user)):
+    event_response = (
+        db.table("events")
+        .select("id, organizer_id, name, start_time, end_time, latitude, longitude")
+        .eq("id", event_id)
+        .limit(1)
+        .execute()
+    )
+    target_event = first_row(event_response.data)
+    if not target_event:
+        raise HTTPException(status_code=404, detail="Event not found")
+    if str(target_event.get("organizer_id") or "") != str(current["user"]["id"]):
+        raise HTTPException(status_code=403, detail="You are not allowed to access this event")
+
+    all_events = (
+        db.table("events")
+        .select("id, name, start_time, end_time, latitude, longitude")
+        .execute()
+        .data
+        or []
+    )
+
+    target_start = datetime.fromisoformat(str(target_event["start_time"]).replace("Z", "+00:00"))
+    target_end = datetime.fromisoformat(str(target_event["end_time"]).replace("Z", "+00:00"))
+    target_lat = float(target_event.get("latitude") or 0)
+    target_lng = float(target_event.get("longitude") or 0)
+
+    collisions = []
+    for other_event in all_events:
+        if str(other_event.get("id")) == str(event_id):
+            continue
+        try:
+            other_start = datetime.fromisoformat(str(other_event["start_time"]).replace("Z", "+00:00"))
+            other_end = datetime.fromisoformat(str(other_event["end_time"]).replace("Z", "+00:00"))
+        except Exception:
+            continue
+
+        overlaps_in_time = target_start <= other_end and other_start <= target_end
+        distance_metric = abs(target_lat - float(other_event.get("latitude") or 0)) + abs(
+            target_lng - float(other_event.get("longitude") or 0)
+        )
+        if overlaps_in_time and distance_metric <= 0.02:
+            collisions.append(
+                {
+                    "event_id": other_event.get("id"),
+                    "event_name": other_event.get("name"),
+                    "distance_metric": round(distance_metric, 6),
+                }
+            )
+
+    return {
+        "status": "success",
+        "event_id": event_id,
+        "collision_detected": bool(collisions),
+        "collisions": collisions,
+    }
+
+
 @router.post("/submit-application")
 async def submit_application(payload: ApplicationSubmitRequest, current=Depends(get_current_user)):
     try:
@@ -556,7 +732,7 @@ async def get_user_applications(current=Depends(get_current_user)):
                     "eventName": event.get("name", "Unknown Event"),
                     "eventType": event.get("category", "Unknown"),
                     "crowdSize": event.get("expected_crowd", 0),
-                    "venueType": event.get("venue_type") or "Public",
+                    "venueType": "Public",
                     "status": overall_status or app.get("status", "Pending"),
                     "submittedAt": app.get("submitted_at"),
                     "address": event.get("raw_address", "Unknown"),
@@ -578,6 +754,12 @@ async def get_application_detail(app_id: str, current=Depends(get_current_user))
         payload = _application_with_event(app_id)
         _assert_application_owner(payload, current["user"]["id"])
         department_rows = payload.get("department_routings") or []
+        query_rows = payload.get("official_queries") or []
+        query_by_routing_id = {}
+        for query_row in query_rows:
+            routing_id = query_row.get("routing_id")
+            if routing_id and routing_id not in query_by_routing_id:
+                query_by_routing_id[routing_id] = query_row
         overall_status = _derive_overall_status_from_departments(department_rows)
         payload["application"]["status"] = overall_status
         payload["departments"] = [
@@ -586,6 +768,7 @@ async def get_application_detail(app_id: str, current=Depends(get_current_user))
                 "status": _normalize_department_status(row.get("status")),
                 "reason": row.get("rejection_reason"),
                 "updatedAt": row.get("updated_at"),
+                "query_id": (query_by_routing_id.get(row.get("id")) or {}).get("id"),
             }
             for row in department_rows
             if row.get("department")
@@ -647,4 +830,69 @@ async def get_notifications(current=Depends(get_current_user)):
         raise HTTPException(
             status_code=500,
             detail=_error_detail(exc, "Failed to fetch notifications"),
+        ) from exc
+
+
+@router.post("/respond-query")
+async def respond_query(payload: RespondQueryRequest, current=Depends(get_current_user)):
+    try:
+        query_response = (
+            db.table("official_queries")
+            .select("id, routing_id, query_text, organizer_response, is_resolved")
+            .eq("id", payload.query_id)
+            .limit(1)
+            .execute()
+        )
+        query_row = first_row(query_response.data)
+        if not query_row:
+            raise HTTPException(status_code=404, detail="Query not found")
+
+        routing_response = (
+            db.table("department_routings")
+            .select("id, app_id, department, status")
+            .eq("id", query_row["routing_id"])
+            .limit(1)
+            .execute()
+        )
+        routing_row = first_row(routing_response.data)
+        if not routing_row:
+            raise HTTPException(status_code=404, detail="Routing record not found for query")
+
+        application_bundle = _application_with_event(routing_row["app_id"])
+        _assert_application_owner(application_bundle, current["user"]["id"])
+
+        updated_query = (
+            db.table("official_queries")
+            .update(
+                _json_ready(
+                    {
+                        "organizer_response": payload.organizer_response,
+                        "is_resolved": True,
+                    }
+                )
+            )
+            .eq("id", payload.query_id)
+            .execute()
+        )
+
+        db.table("department_routings").update(_json_ready({"status": "In Review"})).eq(
+            "id", routing_row["id"]
+        ).execute()
+
+        return {
+            "status": "success",
+            "message": "Query response submitted successfully",
+            "query": first_row(updated_query.data) or {
+                "id": payload.query_id,
+                "organizer_response": payload.organizer_response,
+                "is_resolved": True,
+            },
+            "app_id": routing_row["app_id"],
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=_error_detail(exc, "Failed to submit query response"),
         ) from exc

@@ -27,6 +27,7 @@ const App = () => {
         <Route path="/apply/preview" element={<ApprovalPreviewPage />} />
         <Route path="/apply/confirmation" element={<ApplicationConfirmationPage />} />
         <Route path="/documents" element={<DocumentUploadPage />} />
+        <Route path="/documents/:appId" element={<DocumentUploadPage />} />
         <Route path="/applications" element={<ApplicationsListPage />} />
         <Route path="applications/:id" element={<ApplicationTracking />} />
         <Route path="/notifications" element={<NotificationsPage />} />

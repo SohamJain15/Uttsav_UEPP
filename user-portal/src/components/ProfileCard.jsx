@@ -5,17 +5,17 @@ const getInitials = (name = "") => {
     .trim()
     .split(" ")
     .filter(Boolean);
-  if (parts.length === 0) return "RK";
+  if (parts.length === 0) return "U";
   if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
   return `${parts[0][0]}${parts[1][0]}`.toUpperCase();
 };
 
 const ProfileCard = ({ profile, compact = false, className = "" }) => {
   const safeProfile = {
-    name: profile?.name || "Rajesh Kumar",
-    role: profile?.role || profile?.organization || "NGO",
-    email: profile?.email || "rajesh.kumar@email.com",
-    phone: profile?.phone || "+91 XXXXX XXXXX",
+    name: profile?.name || profile?.full_name || profile?.email?.split("@")?.[0] || "User",
+    role: profile?.role || profile?.organization || profile?.department || "Organizer",
+    email: profile?.email || "-",
+    phone: profile?.phone || profile?.phone_number || "-",
   };
 
   return (

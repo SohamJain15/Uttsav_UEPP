@@ -84,6 +84,21 @@ def _department_from_username(username: str) -> Optional[str]:
     return None
 
 
+def get_role_from_username(username: str) -> str:
+    normalized = str(username or "").strip().upper()
+    if normalized.startswith("P-"):
+        return "Police"
+    if normalized.startswith("F-") or normalized.startswith("FB-"):
+        return "Fire"
+    if normalized.startswith("T-"):
+        return "Traffic"
+    if normalized.startswith("M-"):
+        return "Municipality"
+    if normalized.startswith("A-"):
+        return "Admin"
+    raise HTTPException(status_code=400, detail="Invalid department username")
+
+
 def _normalize_username(username: Any) -> str:
     return str(username or "").strip().upper()
 
@@ -97,65 +112,15 @@ def _generate_username(user_id: str, department: str) -> str:
 def _resolve_login_email(identifier: str) -> str:
     raw_identifier = str(identifier or "").strip()
     if not raw_identifier:
-        raise HTTPException(status_code=400, detail="Username or email is required.")
+        raise HTTPException(status_code=400, detail="Email is required.")
 
     if "@" in raw_identifier:
         return raw_identifier
 
-    username = _normalize_username(raw_identifier)
-    username_department = _department_from_username(username)
-    if not username_department:
-        raise HTTPException(
-            status_code=400,
-            # FIXED: Updated the error message to include A (Admin) and U (Organizer)
-            detail="Department username must start with P, T, FB, M, A, or U.",
-        )
-
-    candidates = [username]
-    compact = username.replace("-", "")
-    if compact not in candidates:
-        candidates.append(compact)
-
-    selected_user = None
-    for candidate in candidates:
-        try:
-            # FIXED: Changed .eq to .ilike for case-insensitive username matching
-            query = db.table("users").select("email, role, prefix").ilike("prefix", candidate).limit(1).execute()
-            row = first_row(query.data)
-            if row:
-                selected_user = row
-                break
-        except Exception:
-            continue
-
-    if not selected_user:
-        for candidate in candidates:
-            try:
-                query = (
-                    db.table("users")
-                    .select("email, role, prefix")
-                    .ilike("prefix", f"{candidate}%")
-                    .limit(1)
-                    .execute()
-                )
-                row = first_row(query.data)
-                if row:
-                    selected_user = row
-                    break
-            except Exception:
-                continue
-
-    if not selected_user or not selected_user.get("email"):
-        raise HTTPException(status_code=404, detail="Department username not found.")
-
-    stored_role = _normalize_department(selected_user.get("role"))
-    if stored_role != username_department:
-        raise HTTPException(
-            status_code=403,
-            detail=f"Username prefix does not match stored department role ({stored_role}).",
-        )
-
-    return str(selected_user["email"])
+    raise HTTPException(
+        status_code=400,
+        detail="Please sign in with your registered email address.",
+    )
 
 
 def _enrich_profile(profile: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
@@ -168,10 +133,10 @@ def _enrich_profile(profile: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any
         enriched["full_name"] = enriched.get("name")
     if not enriched.get("phone_number") and enriched.get("phone"):
         enriched["phone_number"] = enriched.get("phone")
-    if not enriched.get("organization") and enriched.get("organization_type"):
-        enriched["organization"] = enriched.get("organization_type")
-    if not enriched.get("username") and enriched.get("prefix"):
-        enriched["username"] = enriched.get("prefix")
+    if not enriched.get("organization"):
+        enriched["organization"] = None
+    if not enriched.get("username"):
+        enriched["username"] = enriched.get("prefix") or enriched.get("email")
     return enriched
 
 
@@ -192,31 +157,44 @@ def _fetch_profile_by_user_or_email(user_id: Optional[str], email: Optional[str]
     return None
 
 
+def _fetch_department_user_by_username(username: str) -> Optional[Dict[str, Any]]:
+    role = get_role_from_username(username)
+    normalized_username = _normalize_username(username)
+    response = (
+        db.table("users")
+        .select("*")
+        .eq("prefix", normalized_username)
+        .eq("role", role)
+        .limit(1)
+        .execute()
+    )
+    return first_row(response.data)
+
+
+def _validate_department_login_password(user_row: Dict[str, Any], password: str) -> None:
+    stored_password = user_row.get("password") or user_row.get("password_hash")
+
+    if stored_password:
+        if str(stored_password) != str(password):
+            raise HTTPException(status_code=401, detail="Invalid credentials")
+        return
+
+    # Demo fallback for seeded department users where auth.users has the real password
+    # but public.users has no password hash column populated.
+    if str(password) != "Admin@123":
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+
+
 def _user_payload_candidates(user_id: str, email: str, payload: Dict[str, Any]) -> list[Dict[str, Any]]:
     department = _normalize_department(payload.get("department"))
-    username = _normalize_username(payload.get("username") or _generate_username(user_id, department))
     return [
         {
             "id": user_id,
             "email": email,
             "name": payload.get("full_name"),
             "phone": payload.get("phone_number"),
-            "organization_type": payload.get("organization"),
             "role": department,
-            "prefix": username,
-            "is_active": True,
-        },
-        {
-            "id": user_id,
-            "email": email,
-            "full_name": payload.get("full_name"),
-            "phone_number": payload.get("phone_number"),
-            "organization": payload.get("organization"),
-            "department": department,
-        },
-        {
-            "id": user_id,
-            "email": email,
+            "is_verified": True,
         },
     ]
 
@@ -290,9 +268,7 @@ async def register_user(payload: AuthRegisterRequest):
             payload={
                 "full_name": payload.full_name,
                 "phone_number": payload.phone_number,
-                "organization": payload.organization,
                 "department": department,
-                "username": username or None,
             },
         )
 
@@ -313,7 +289,58 @@ async def register_user(payload: AuthRegisterRequest):
 @router.post("/api/auth/login")
 async def login_user(credentials: UserCredentials):
     try:
-        login_email = _resolve_login_email(credentials.email)
+        login_identifier = str(credentials.email or "").strip()
+        if not login_identifier:
+            raise HTTPException(status_code=400, detail="Email or username is required.")
+
+        login_email = login_identifier
+        department_profile = None
+
+        if "@" not in login_identifier:
+            department_user = _fetch_department_user_by_username(login_identifier)
+            if not department_user:
+                raise HTTPException(status_code=401, detail="Invalid credentials")
+
+            _validate_department_login_password(department_user, credentials.password)
+            login_email = department_user.get("email")
+            if not login_email:
+                raise HTTPException(
+                    status_code=500,
+                    detail="Department profile does not have a linked email address.",
+                )
+            department_profile = _enrich_profile(
+                {
+                    **department_user,
+                    "full_name": department_user.get("name"),
+                    "phone_number": department_user.get("phone"),
+                    "department": department_user.get("role"),
+                    "organization": department_user.get("organization_type"),
+                    "username": department_user.get("prefix"),
+                }
+            )
+
+            local_token = f"department::{department_user.get('id')}::{department_user.get('role')}"
+            return {
+                "status": "success",
+                "message": "Login successful",
+                "access_token": local_token,
+                "token_type": "bearer",
+                "user": {
+                    "id": department_user.get("id"),
+                    "email": department_user.get("email"),
+                    "phone": department_user.get("phone"),
+                    "user_metadata": {
+                        "role": department_user.get("role"),
+                        "department": department_user.get("role"),
+                        "username": department_user.get("prefix"),
+                        "full_name": department_user.get("name"),
+                    },
+                },
+                "profile": department_profile,
+            }
+        else:
+            login_email = _resolve_login_email(login_identifier)
+
         auth_client = _new_auth_client()
         response = auth_client.auth.sign_in_with_password(
             {"email": login_email, "password": credentials.password}
@@ -326,7 +353,9 @@ async def login_user(credentials: UserCredentials):
             raise HTTPException(status_code=401, detail="Login failed: no access token returned")
 
         metadata = (getattr(response.user, "user_metadata", None) or {}) if getattr(response, "user", None) else {}
-        profile = _fetch_profile_by_user_or_email(user_data.get("id"), user_data.get("email"))
+        profile = department_profile or _fetch_profile_by_user_or_email(
+            user_data.get("id"), user_data.get("email")
+        )
         if profile is None:
             profile = {
                 "id": user_data.get("id"),
@@ -385,14 +414,10 @@ async def update_profile(payload: UserProfileUpdateRequest, current=Depends(get_
             "phone_number": update_data.get("phone_number")
             or existing.get("phone_number")
             or existing.get("phone"),
-            "organization": update_data.get("organization")
-            or existing.get("organization")
-            or existing.get("organization_type"),
             "department": update_data.get("department")
             or existing.get("department")
             or existing.get("role")
             or "Organizer",
-            "username": existing.get("username") or existing.get("prefix"),
         }
 
         profile = _upsert_user_profile(

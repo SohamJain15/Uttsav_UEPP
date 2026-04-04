@@ -27,6 +27,7 @@ const normalizeDepartments = (departments = []) =>
       status: normalizeStatus(department.status),
       reason: department.reason || department.rejection_reason || "",
       updatedAt: department.updatedAt || department.updated_at || null,
+      queryId: department.queryId || department.query_id || null,
     }));
 
 const buildTimelineFromDepartments = (departments = []) => [
@@ -287,6 +288,7 @@ const normalizeApplicationDetail = (payload = {}) => {
       queryByDepartment[department.name] = {
         message: department.reason,
         raisedAt: department.updatedAt || "",
+        queryId: department.queryId || null,
       };
     }
     if (department.status === "Rejected" && department.reason) {
@@ -380,6 +382,16 @@ export const applicationService = {
       headers: {
         "Content-Type": "multipart/form-data",
       },
+    });
+    return response.data;
+  },
+
+  async respondToQuery({ queryId, responseText, appId, documentId }) {
+    const response = await api.post("/api/user/respond-query", {
+      query_id: queryId,
+      organizer_response: responseText,
+      app_id: appId || null,
+      document_id: documentId || null,
     });
     return response.data;
   },

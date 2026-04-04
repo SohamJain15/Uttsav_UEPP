@@ -1,6 +1,7 @@
+from datetime import datetime
 from typing import Any, Dict, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class UserCredentials(BaseModel):
@@ -9,8 +10,8 @@ class UserCredentials(BaseModel):
 
 
 class AuthRegisterRequest(UserCredentials):
-    full_name: str
-    phone_number: Optional[str] = None
+    full_name: str = Field(..., min_length=1)
+    phone_number: str = Field(..., min_length=1)
     organization: Optional[str] = None
     department: Optional[str] = None
     username: Optional[str] = None
@@ -24,16 +25,28 @@ class UserProfileUpdateRequest(BaseModel):
 
 
 class DepartmentActionRequest(BaseModel):
-    action: str
+    action: str = Field(..., min_length=1)
     rejection_reason: Optional[str] = None
+
+
+class RaiseQueryRequest(BaseModel):
+    app_id: str = Field(..., min_length=1)
+    query_text: str = Field(..., min_length=3)
+
+
+class RespondQueryRequest(BaseModel):
+    query_id: str = Field(..., min_length=1)
+    organizer_response: str = Field(..., min_length=1)
+    app_id: Optional[str] = None
+    document_id: Optional[str] = None
 
 
 class ApplicationSubmitRequest(BaseModel):
     event_name: str
     event_type: str
     crowd_size: int
-    start_date: str
-    end_date: str
+    start_date: datetime
+    end_date: datetime
 
     venue_name: str = Field(..., min_length=1)
     venue_type: str = Field(..., min_length=1)
@@ -51,6 +64,7 @@ class ApplicationSubmitRequest(BaseModel):
 
 
 class RiskAnalysisRequest(BaseModel):
+    model_config = ConfigDict(extra="allow")
     # Frontend-friendly fields
     event_type: Optional[str] = None
     venue_type: Optional[str] = None
@@ -91,10 +105,6 @@ class RiskAnalysisRequest(BaseModel):
     Food_Stalls_Present: Optional[int] = None
     Liquor_Served: Optional[int] = None
 
-    class Config:
-        extra = "allow"
-
-
 class AssistantQueryRequest(BaseModel):
     question: str = Field(..., min_length=3, max_length=1200)
     current_step: Optional[int] = None
@@ -103,6 +113,7 @@ class AssistantQueryRequest(BaseModel):
 
 
 class ApprovalProbabilityRequest(BaseModel):
+    model_config = ConfigDict(extra="allow")
     # Frontend-compatible fields
     eventType: Optional[str] = None
     crowdSize: Optional[int] = None
@@ -131,11 +142,8 @@ class ApprovalProbabilityRequest(BaseModel):
     traffic_impact: Optional[str] = None
     is_moving_procession: Optional[bool] = None
 
-    class Config:
-        extra = "allow"
-
-
 class RouteCollisionRequest(BaseModel):
+    model_config = ConfigDict(extra="allow")
     isMovingProcession: Optional[bool] = None
     is_moving_procession: Optional[bool] = None
 
@@ -173,6 +181,3 @@ class RouteCollisionRequest(BaseModel):
     temporalThresholdMinutes: Optional[int] = None
     spatial_threshold_meters: Optional[float] = None
     temporal_threshold_minutes: Optional[int] = None
-
-    class Config:
-        extra = "allow"

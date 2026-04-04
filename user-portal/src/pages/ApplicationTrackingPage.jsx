@@ -52,6 +52,9 @@ const ApplicationTrackingPage = () => {
   const [application, setApplication] = useState(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState("");
+  const [queryResponses, setQueryResponses] = useState({});
+  const [queryMessage, setQueryMessage] = useState("");
+  const [isSubmittingQuery, setIsSubmittingQuery] = useState(false);
 
   useEffect(() => {
     if (!id) {
@@ -123,6 +126,41 @@ const ApplicationTrackingPage = () => {
   }, [application]);
 
   const departmentsWithRequests = timelineItems.filter((item) => item.needsAction);
+
+  const handleQueryResponse = async (departmentName) => {
+    const responseText = String(queryResponses[departmentName] || "").trim();
+    const queryId = application?.queryByDepartment?.[departmentName]?.queryId;
+
+    if (!responseText) {
+      setQueryMessage("Please enter a response before submitting.");
+      return;
+    }
+    if (!queryId) {
+      setQueryMessage("This query does not have a query ID yet. Please refresh and try again.");
+      return;
+    }
+
+    setIsSubmittingQuery(true);
+    setQueryMessage("");
+
+    try {
+      await applicationService.respondToQuery({
+        queryId,
+        responseText,
+        appId: application?.id,
+      });
+      setQueryResponses((previous) => ({ ...previous, [departmentName]: "" }));
+      const refreshed = await applicationService.getApplicationById(id);
+      setApplication(refreshed);
+      setQueryMessage("Query response submitted successfully.");
+    } catch (submitError) {
+      setQueryMessage(
+        applicationService.getErrorMessage(submitError, "Unable to submit query response.")
+      );
+    } finally {
+      setIsSubmittingQuery(false);
+    }
+  };
 
   const infoItems = [
     {
@@ -233,7 +271,7 @@ const ApplicationTrackingPage = () => {
               </p>
             </div>
             <Link
-              to="/documents"
+              to={`/documents/${application?.id || id}`}
               className="rounded-md bg-[#F59E0B] px-4 py-2 text-white"
             >
               Upload Documents
@@ -271,6 +309,34 @@ const ApplicationTrackingPage = () => {
 
                   {item.reason ? (
                     <p className="mt-2 text-[13px] text-gray-500">{item.reason}</p>
+                  ) : null}
+
+                  {item.status === "Query Raised" ? (
+                    <div className="mt-3 space-y-2">
+                      <textarea
+                        value={queryResponses[item.name] || ""}
+                        onChange={(event) =>
+                          setQueryResponses((previous) => ({
+                            ...previous,
+                            [item.name]: event.target.value,
+                          }))
+                        }
+                        className="w-full rounded-lg border border-gray-200 p-3 text-sm text-[#0F172A]"
+                        rows={3}
+                        placeholder={`Respond to ${item.name}'s query`}
+                      />
+                      <button
+                        type="button"
+                        disabled={isSubmittingQuery}
+                        onClick={() => handleQueryResponse(item.name)}
+                        className="rounded-md bg-[#1E40AF] px-4 py-2 text-sm font-semibold text-white disabled:opacity-60"
+                      >
+                        {isSubmittingQuery ? "Submitting..." : "Submit Query Response"}
+                      </button>
+                      {queryMessage ? (
+                        <p className="text-xs text-[#475569]">{queryMessage}</p>
+                      ) : null}
+                    </div>
                   ) : null}
 
                   {item.needsAction && item.requestedDocuments.length > 0 ? (

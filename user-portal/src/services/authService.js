@@ -24,7 +24,7 @@ const normalizeAuthPayload = (data = {}) => {
 
 export const authService = {
   async login(payload) {
-    const response = await api.post("/api/user/login", payload);
+    const response = await api.post("/api/auth/login", payload);
     const normalizedData = normalizeAuthPayload(response.data);
 
     // FIX: Actively store the token so the api.js interceptor can attach it to future requests
@@ -39,8 +39,11 @@ export const authService = {
     const registerPayload = {
       email: payload.email,
       password: payload.password,
+      full_name: payload.full_name || payload.fullName || payload.name || payload.email?.split("@")?.[0] || "User",
+      phone_number: payload.phone_number || payload.phoneNumber || payload.phone || `NA-${Date.now()}`,
+      department: payload.department || "Organizer",
     };
-    const response = await api.post("/api/user/signup", registerPayload);
+    const response = await api.post("/api/auth/register", registerPayload);
     return response.data;
   },
 

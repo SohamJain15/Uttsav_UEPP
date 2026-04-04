@@ -2,6 +2,21 @@ import { useAuth } from '../context/AuthContext';
 import { usePortalUi } from '../context/PortalUiContext';
 import { useNavigate } from 'react-router-dom';
 
+const getInitials = (name = '') => {
+  const parts = String(name || '')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+
+  if (!parts.length) return 'U';
+  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+  return parts
+    .slice(0, 2)
+    .map((part) => part[0])
+    .join('')
+    .toUpperCase();
+};
+
 const IconButton = ({ children, onClick }) => (
   <button
     onClick={onClick}
@@ -43,6 +58,14 @@ const Navbar = () => {
           </span>
           <IconButton onClick={toggleNotifications}>Notifications</IconButton>
           <IconButton onClick={() => navigate('/profile')}>Profile</IconButton>
+          <button
+            type="button"
+            onClick={() => navigate('/profile')}
+            className="flex h-10 w-10 items-center justify-center rounded-full bg-primary text-sm font-bold text-white"
+            aria-label="Open profile"
+          >
+            {getInitials(user?.fullName || user?.username || user?.email || 'User')}
+          </button>
         </div>
       </div>
     </header>

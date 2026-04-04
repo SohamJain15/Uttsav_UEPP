@@ -24,25 +24,18 @@ const extractRole = ({ profile, user }) =>
   normalizeRole(user?.user_metadata?.department) ||
   normalizeRole(user?.department);
 
+const normalizeDepartmentUsername = (value = '') => String(value || '').trim().toUpperCase();
+
 export const authService = {
   async login({ username, password }) {
-    const normalizedUsername = String(username || '').trim().toUpperCase();
-    const usernameWithoutDash = normalizedUsername.replace('-', '');
-    
-    // FIX 1: Added 'A' to the valid prefixes for Admin support
-    const startsWithValidPrefix =
-      usernameWithoutDash.startsWith('P') ||
-      usernameWithoutDash.startsWith('T') ||
-      usernameWithoutDash.startsWith('FB') ||
-      usernameWithoutDash.startsWith('M') ||
-      usernameWithoutDash.startsWith('A');
+    const loginIdentifier = normalizeDepartmentUsername(username);
 
-    if (!startsWithValidPrefix) {
-      throw new Error('Department username must start with P, T, FB, M, or A.');
+    if (!/^(P|F|FB|T|M|A)-[A-Z0-9]+$/.test(loginIdentifier)) {
+      throw new Error('Please sign in with a valid department username like P-1001 or F-1001.');
     }
 
-    const loginResponse = await api.post('/api/user/login', {
-      email: normalizedUsername,
+    const loginResponse = await api.post('/api/auth/login', {
+      email: loginIdentifier,
       password,
     });
     
@@ -86,8 +79,13 @@ export const authService = {
       user: {
         id: user?.id || profile?.id || '',
         email: user?.email || profile?.email || '',
-        username: profile?.username || profile?.prefix || normalizedUsername,
-        fullName: profile?.full_name || user?.full_name || '',
+        username: profile?.username || loginIdentifier,
+        fullName:
+          profile?.full_name ||
+          user?.user_metadata?.full_name ||
+          user?.full_name ||
+          profile?.username ||
+          loginIdentifier,
         department: profile?.department || user?.user_metadata?.department || role,
         role,
         departmentLabel: ROLE_LABELS[role] || role,

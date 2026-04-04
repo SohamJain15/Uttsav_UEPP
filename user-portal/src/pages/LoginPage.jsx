@@ -1,10 +1,11 @@
 import { useState } from "react";
 import { useForm } from "react-hook-form";
 import { Link, useNavigate } from "react-router-dom";
-import { authService } from "../services/authService";
+import { useAuth } from "../context/AuthContext";
 
 const LoginPage = () => {
   const navigate = useNavigate();
+  const { login } = useAuth();
   const [loading, setLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
   const { register, handleSubmit } = useForm();
@@ -14,8 +15,7 @@ const LoginPage = () => {
     setErrorMessage("");
 
     try {
-      const response = await authService.login(values);
-      localStorage.setItem("uttsav_auth", JSON.stringify(response));
+      await login(values);
       navigate("/dashboard", { replace: true });
     } catch (error) {
       setErrorMessage(

@@ -81,9 +81,32 @@ export const departmentService = {
 
   async submitAction({ appId, action, rejectionReason }) {
     const normalizedAction = String(action || '').trim().toLowerCase();
-    return api.post(`/api/dept/applications/${appId}/action`, {
+
+    if (normalizedAction === 'query') {
+      return api.post('/api/dept/raise-query', {
+        app_id: appId,
+        query_text: rejectionReason || 'Please provide additional clarification.',
+      });
+    }
+
+    const response = await api.post(`/api/dept/applications/${appId}/action`, {
       action: normalizedAction,
       rejection_reason: rejectionReason || null,
     });
+
+    if (normalizedAction === 'approve') {
+      try {
+        return await api.post(`/api/dept/applications/${appId}/generate-noc`, {});
+      } catch (error) {
+        return response;
+      }
+    }
+
+    return response;
+  },
+
+  async getQueries() {
+    const response = await api.get('/api/dept/queries');
+    return Array.isArray(response?.queries) ? response.queries : [];
   },
 };

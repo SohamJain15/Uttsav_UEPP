@@ -5,7 +5,7 @@ import json
 import math
 import os
 import re
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
@@ -446,7 +446,7 @@ def analyze_route_collision(payload: Dict[str, Any]) -> Dict[str, Any]:
     start_dt = _parse_datetime(str(start_date or ""), str(start_time or ""))
     end_dt = _parse_datetime(str(end_date or ""), str(end_time or ""))
     if start_dt is None:
-        start_dt = datetime.utcnow() + timedelta(days=1)
+        start_dt = datetime.now(UTC).replace(tzinfo=None) + timedelta(days=1)
     if end_dt is None or end_dt <= start_dt:
         end_dt = start_dt + timedelta(hours=4)
 
@@ -544,4 +544,3 @@ def analyze_route_collision(payload: Dict[str, Any]) -> Dict[str, Any]:
         "recommendations": recommendations,
         "model_version": "collision-4d-v1",
     }
-

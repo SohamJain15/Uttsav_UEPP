@@ -1,23 +1,36 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { Bell, Menu } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import ProfileCard from "./ProfileCard";
-import { authService } from "../services/authService";
+import { useAuth } from "../context/AuthContext";
+
+const getInitials = (name = "") => {
+  const parts = String(name || "")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+
+  if (!parts.length) return "U";
+  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+  return parts
+    .slice(0, 2)
+    .map((part) => part[0])
+    .join("")
+    .toUpperCase();
+};
 
 const Header = ({ title, onOpenSidebar }) => {
   const navigate = useNavigate();
+  const { user, logout } = useAuth();
   const [isProfileOpen, setIsProfileOpen] = useState(false);
-  const [profile, setProfile] = useState(null);
-  const profileForCard = profile ? { ...profile, role: profile.role || "NGO" } : null;
-
-  useEffect(() => {
-    const loadProfile = async () => {
-      const response = await authService.getProfile();
-      setProfile(response || null);
-    };
-
-    loadProfile();
-  }, []);
+  const profileForCard = user
+    ? {
+        name: user.name || user.full_name || user.email,
+        role: user.role || user.department || "Organizer",
+        email: user.email,
+        phone: user.phone || user.phone_number,
+      }
+    : null;
 
   return (
     <header className="sticky top-0 z-30 border-b border-slate-200 bg-white/95 backdrop-blur">
@@ -48,10 +61,10 @@ const Header = ({ title, onOpenSidebar }) => {
             <button
               type="button"
               onClick={() => setIsProfileOpen((prev) => !prev)}
-                className="inline-flex h-10 w-10 items-center justify-center rounded-full bg-govBlue text-sm font-semibold text-white"
-                aria-label="Open profile menu"
-              >
-              {profileForCard?.avatar || "RK"}
+              className="inline-flex h-10 w-10 items-center justify-center rounded-full bg-govBlue text-sm font-semibold text-white"
+              aria-label="Open profile menu"
+            >
+              {getInitials(profileForCard?.name || user?.email || "User")}
             </button>
 
             {isProfileOpen ? (
@@ -72,7 +85,7 @@ const Header = ({ title, onOpenSidebar }) => {
                     type="button"
                     onClick={() => {
                       setIsProfileOpen(false);
-                      localStorage.removeItem("uttsav_auth");
+                      logout();
                       navigate("/login");
                     }}
                     className="flex-1 rounded-lg bg-slate-100 px-3 py-2 text-sm font-medium text-textPrimary hover:bg-slate-200"

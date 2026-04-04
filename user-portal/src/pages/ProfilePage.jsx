@@ -1,20 +1,28 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { authService } from "../services/authService";
 import ProfileCard from "../components/ProfileCard";
+import { useAuth } from "../context/AuthContext";
 
 const ProfilePage = () => {
   const navigate = useNavigate();
+  const { user, refreshProfile, logout } = useAuth();
   const [profile, setProfile] = useState(null);
 
   useEffect(() => {
     const loadProfile = async () => {
-      const response = await authService.getProfile();
-      setProfile(response);
+      const response = await refreshProfile();
+      setProfile(
+        response || {
+          name: user?.name || user?.full_name || user?.email,
+          role: user?.role || user?.department || "Organizer",
+          email: user?.email,
+          phone: user?.phone || user?.phone_number,
+        }
+      );
     };
 
     loadProfile();
-  }, []);
+  }, [refreshProfile, user]);
 
   if (!profile) {
     return (
@@ -37,7 +45,10 @@ const ProfilePage = () => {
         </button>
         <button
           type="button"
-          onClick={() => navigate("/login")}
+          onClick={() => {
+            logout();
+            navigate("/login", { replace: true });
+          }}
           className="rounded-lg bg-danger px-4 py-2 text-sm font-medium text-white hover:bg-red-700"
         >
           Logout

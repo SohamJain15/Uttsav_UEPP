@@ -1,13 +1,21 @@
-from datetime import datetime, timedelta
+import uuid
+from io import BytesIO
+from datetime import UTC, datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 from app.core.auth import fetch_user_profile, first_row, get_current_user
 from app.core.database import db
-from app.models.schemas import DepartmentActionRequest
+from app.models.schemas import DepartmentActionRequest, RaiseQueryRequest
 
 router = APIRouter()
+
+DOCUMENT_BUCKET = "application_documents"
 
 
 def _error_detail(exc: Exception, fallback: str) -> str:
@@ -78,6 +86,14 @@ def _normalize_risk_level(raw_level: Any) -> str:
     return "Medium"
 
 
+def _derive_risk_level(crowd_size: int) -> str:
+    if crowd_size >= 1000:
+        return "High"
+    if crowd_size >= 300:
+        return "Medium"
+    return "Low"
+
+
 def _derive_overall_status_from_routings(routing_rows: List[Dict[str, Any]]) -> str:
     statuses = [_normalize_routing_status(row.get("status")) for row in routing_rows]
     if not statuses:
@@ -94,7 +110,7 @@ def _derive_overall_status_from_routings(routing_rows: List[Dict[str, Any]]) -> 
 
 
 def _derive_due_at(submitted_at: Optional[str], default_hours: int = 72) -> str:
-    now = datetime.utcnow()
+    now = datetime.now(UTC).replace(tzinfo=None)
     if submitted_at:
         try:
             base = datetime.fromisoformat(str(submitted_at).replace("Z", "+00:00")).replace(tzinfo=None)
@@ -157,7 +173,7 @@ def _serialize_department_application(bundle: Dict[str, Any], department: Option
     )
 
     crowd_size = int(event.get("expected_crowd") or 0)
-    risk_level = _normalize_risk_level(application.get("risk_level"))
+    risk_level = _derive_risk_level(crowd_size)
     risk_score = 75 if risk_level == "High" else 50 if risk_level == "Medium" else 30
     area = str(event.get("city") or "").strip() or "Unknown Area"
     pincode = str(event.get("pincode") or "").strip() or "000000"
@@ -248,22 +264,13 @@ def _fetch_application_bundle(app_id: str, department: Optional[str] = None) -> 
         routing_query = routing_query.eq("department", department)
     routing_response = routing_query.order("updated_at", desc=True).execute()
 
-    try:
-        docs_response = (
-            db.table("documents")
-            .select("*")
-            .eq("app_id", app_id)
-            .order("created_at", desc=True)
-            .execute()
-        )
-    except Exception:
-        docs_response = (
-            db.table("documents")
-            .select("*")
-            .eq("app_id", app_id)
-            .order("uploaded_at", desc=True)
-            .execute()
-        )
+    docs_response = (
+        db.table("documents")
+        .select("id, app_id, doc_type, file_name, storage_url, uploaded_at")
+        .eq("app_id", app_id)
+        .order("uploaded_at", desc=True)
+        .execute()
+    )
 
     return {
         "application": application,
@@ -293,6 +300,150 @@ def _sync_application_status(app_id: str) -> str:
         except Exception:
             continue
     return overall_status
+
+
+def _upload_noc_pdf(app_id: str, pdf_bytes: bytes) -> str:
+    file_path = f"NOC/{app_id}/{app_id}-{uuid.uuid4().hex}.pdf"
+    try:
+        db.storage.from_(DOCUMENT_BUCKET).upload(file_path, pdf_bytes)
+    except TypeError:
+        db.storage.from_(DOCUMENT_BUCKET).upload(
+            path=file_path,
+            file=pdf_bytes,
+            file_options={"content-type": "application/pdf", "upsert": "true"},
+        )
+    return db.storage.from_(DOCUMENT_BUCKET).get_public_url(file_path)
+
+
+def _insert_noc_document_record(app_id: str, file_name: str, storage_url: str) -> Optional[Any]:
+    response = (
+        db.table("documents")
+        .insert(
+            {
+                "app_id": app_id,
+                "doc_type": "NOC",
+                "file_name": file_name,
+                "storage_url": storage_url,
+            }
+        )
+        .execute()
+    )
+    row = first_row(response.data)
+    return row.get("id") if row else None
+
+
+def _mark_application_noc_approved(app_id: str) -> None:
+    db.table("applications").update({"status": "Approved"}).eq("app_id", app_id).execute()
+
+
+def _build_noc_pdf(bundle: Dict[str, Any]) -> BytesIO:
+    application = bundle.get("application") or {}
+    event = bundle.get("event") or {}
+    profile = fetch_user_profile(str(application.get("user_id") or "")) if application.get("user_id") else None
+
+    app_id = str(application.get("app_id") or "Unknown Application")
+    event_name = str(event.get("name") or "Unknown Event")
+    organizer_name = str(
+        (profile or {}).get("full_name")
+        or (profile or {}).get("name")
+        or application.get("user_id")
+        or "Organizer"
+    )
+    organizer_email = str((profile or {}).get("email") or "N/A")
+    venue = str(event.get("raw_address") or "N/A")
+    start_date = str(event.get("start_time") or "N/A")
+    end_date = str(event.get("end_time") or "N/A")
+    issue_date = datetime.now(UTC).strftime("%d %b %Y")
+
+    buffer = BytesIO()
+    document = SimpleDocTemplate(
+        buffer,
+        pagesize=A4,
+        rightMargin=42,
+        leftMargin=42,
+        topMargin=48,
+        bottomMargin=36,
+    )
+    styles = getSampleStyleSheet()
+
+    story = [
+        Paragraph("<b>UTTSAV UEPP</b>", styles["Title"]),
+        Paragraph("<b>No Objection Certificate</b>", styles["Title"]),
+        Spacer(1, 24),
+        Paragraph(
+            "Official No Objection Certificate Granted for Event.",
+            styles["Heading2"],
+        ),
+        Spacer(1, 18),
+        Paragraph(
+            "This certificate confirms that the event application listed below has been reviewed "
+            "and granted a No Objection Certificate by the concerned department authority.",
+            styles["BodyText"],
+        ),
+        Spacer(1, 18),
+    ]
+
+    details_table = Table(
+        [
+            ["Application ID", app_id],
+            ["Event Name", event_name],
+            ["Organizer", organizer_name],
+            ["Organizer Email", organizer_email],
+            ["Venue", venue],
+            ["Event Start", start_date],
+            ["Event End", end_date],
+            ["Issued On", issue_date],
+        ],
+        colWidths=[140, 340],
+    )
+    details_table.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#F1F5F9")),
+                ("TEXTCOLOR", (0, 0), (-1, -1), colors.HexColor("#0F172A")),
+                ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
+                ("FONTNAME", (1, 0), (1, -1), "Helvetica"),
+                ("FONTSIZE", (0, 0), (-1, -1), 10),
+                ("GRID", (0, 0), (-1, -1), 0.8, colors.HexColor("#94A3B8")),
+                ("ROWBACKGROUNDS", (0, 0), (-1, -1), [colors.white, colors.HexColor("#F8FAFC")]),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("LEFTPADDING", (0, 0), (-1, -1), 10),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 10),
+                ("TOPPADDING", (0, 0), (-1, -1), 8),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+            ]
+        )
+    )
+    story.extend(
+        [
+            details_table,
+            Spacer(1, 26),
+            Paragraph(
+                "Authorized electronically by Uttsav UEPP Department Portal.",
+                styles["BodyText"],
+            ),
+        ]
+    )
+
+    document.build(story)
+    buffer.seek(0)
+    return buffer
+
+
+def _get_department_routing(app_id: str, department: str) -> Dict[str, Any]:
+    for department_candidate in _routing_department_candidates(department):
+        response = (
+            db.table("department_routings")
+            .select("id, app_id, department, status, reviewed_by, reviewed_at, rejection_reason")
+            .eq("app_id", app_id)
+            .eq("department", department_candidate)
+            .limit(1)
+            .execute()
+        )
+        row = first_row(response.data)
+        if row:
+            return row
+    raise HTTPException(status_code=404, detail="No routing record found for this department")
 
 
 def _routing_department_candidates(department: str) -> List[str]:
@@ -473,23 +624,8 @@ async def mark_application_in_review(app_id: str, current=Depends(get_current_us
         raise HTTPException(status_code=400, detail="Only department users can mark in-review status")
 
     try:
-        row = None
-        matched_department = None
-        for department_candidate in _routing_department_candidates(department):
-            existing = (
-                db.table("department_routings")
-                .select("*")
-                .eq("app_id", app_id)
-                .eq("department", department_candidate)
-                .limit(1)
-                .execute()
-            )
-            row = first_row(existing.data)
-            if row:
-                matched_department = department_candidate
-                break
-        if not row:
-            raise HTTPException(status_code=404, detail="No routing record found for this department")
+        row = _get_department_routing(app_id, department)
+        matched_department = row["department"]
 
         current_status = _normalize_routing_status(row.get("status"))
         if current_status in {"Approved", "Rejected"}:
@@ -505,9 +641,15 @@ async def mark_application_in_review(app_id: str, current=Depends(get_current_us
                 try:
                     updated = (
                         db.table("department_routings")
-                        .update({"status": status_candidate})
+                        .update(
+                            {
+                                "status": status_candidate,
+                                "reviewed_by": current["user"]["id"],
+                                "reviewed_at": datetime.now(UTC).isoformat(),
+                            }
+                        )
                         .eq("app_id", app_id)
-                        .eq("department", matched_department or department)
+                        .eq("department", matched_department)
                         .execute()
                     )
                     updated_row = first_row(updated.data)
@@ -566,20 +708,7 @@ async def update_department_action(
         }.get(normalized_action, [normalized_action])
 
         target_department = None
-        for department_candidate in _routing_department_candidates(department):
-            exists = (
-                db.table("department_routings")
-                .select("id")
-                .eq("app_id", app_id)
-                .eq("department", department_candidate)
-                .limit(1)
-                .execute()
-            )
-            if first_row(exists.data):
-                target_department = department_candidate
-                break
-        if not target_department:
-            raise HTTPException(status_code=404, detail="No routing record found for this department")
+        target_department = _get_department_routing(app_id, department)["department"]
 
         update_payload = {}
         if normalized_action in {"Rejected", "Query Raised"}:
@@ -591,6 +720,8 @@ async def update_department_action(
         for status_candidate in action_status_candidates:
             try:
                 candidate_payload = {**update_payload, "status": status_candidate}
+                candidate_payload["reviewed_by"] = current["user"]["id"]
+                candidate_payload["reviewed_at"] = datetime.now(UTC).isoformat()
                 response = (
                     db.table("department_routings")
                     .update(candidate_payload)
@@ -622,6 +753,92 @@ async def update_department_action(
         ) from exc
 
 
+@router.post("/api/dept/raise-query")
+async def raise_query(payload: RaiseQueryRequest, current=Depends(get_current_user)):
+    department = _resolve_department(current)
+    if not department or department == "Admin":
+        raise HTTPException(status_code=400, detail="Only department users can raise organizer queries")
+
+    try:
+        routing_row = _get_department_routing(payload.app_id, department)
+        insert_response = (
+            db.table("official_queries")
+            .insert(
+                {
+                    "routing_id": routing_row["id"],
+                    "official_id": current["user"]["id"],
+                    "query_text": payload.query_text,
+                    "is_resolved": False,
+                }
+            )
+            .execute()
+        )
+        db.table("department_routings").update(
+            {
+                "status": "Query Raised",
+                "rejection_reason": payload.query_text,
+                "reviewed_by": current["user"]["id"],
+                "reviewed_at": datetime.now(UTC).isoformat(),
+            }
+        ).eq("id", routing_row["id"]).execute()
+        _sync_application_status(payload.app_id)
+
+        return {
+            "status": "success",
+            "message": "Query raised successfully",
+            "query": first_row(insert_response.data) or {
+                "routing_id": routing_row["id"],
+                "official_id": current["user"]["id"],
+                "query_text": payload.query_text,
+                "is_resolved": False,
+            },
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=_error_detail(exc, "Failed to raise query"),
+        ) from exc
+
+
+@router.post("/api/dept/applications/{app_id}/generate-noc")
+async def generate_noc_certificate(app_id: str, current=Depends(get_current_user)):
+    department = _resolve_department(current)
+    if not department:
+        raise HTTPException(status_code=400, detail="Unable to resolve department for current user")
+
+    try:
+        bundle = _fetch_application_bundle(app_id, department=None)
+        pdf_buffer = _build_noc_pdf(bundle)
+        pdf_bytes = pdf_buffer.getvalue()
+        file_name = f"NOC-{app_id}.pdf"
+        noc_url = _upload_noc_pdf(app_id, pdf_bytes)
+        document_id = _insert_noc_document_record(app_id, file_name, noc_url)
+        _mark_application_noc_approved(app_id)
+
+        return {
+            "status": "success",
+            "message": "NOC generated successfully",
+            "app_id": app_id,
+            "department": department,
+            "noc_url": noc_url,
+            "document_id": document_id,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=_error_detail(exc, "Failed to generate NOC certificate"),
+        ) from exc
+
+
+@router.post("/generate-noc/{app_id}")
+async def generate_noc_certificate_alias(app_id: str, current=Depends(get_current_user)):
+    return await generate_noc_certificate(app_id, current)
+
+
 @router.get("/api/dept/queries")
 async def get_department_queries(current=Depends(get_current_user)):
     department = _resolve_department(current)
@@ -631,49 +848,42 @@ async def get_department_queries(current=Depends(get_current_user)):
         raise HTTPException(status_code=400, detail="Admin role is not scoped to a single department query queue")
 
     try:
-        response = None
-        status_filters = [["Query", "Query Raised"], ["Query"], ["Query Raised"]]
-        for department_candidate in _routing_department_candidates(department):
-            found = False
-            for status_filter in status_filters:
-                try:
-                    response = (
-                        db.table("department_routings")
-                        .select("app_id, status, rejection_reason, updated_at, applications(status, events(name, raw_address))")
-                        .eq("department", department_candidate)
-                        .in_("status", status_filter)
-                        .order("updated_at", desc=True)
-                        .execute()
-                    )
-                    if response.data is not None:
-                        found = True
-                        break
-                except Exception:
-                    continue
-            if found:
-                break
-        if response is None:
-            response = (
-                db.table("department_routings")
-                .select("app_id, status, rejection_reason, updated_at, applications(status, events(name, raw_address))")
-                .order("updated_at", desc=True)
-                .execute()
-            )
+        queries_response = (
+            db.table("official_queries")
+            .select("id, routing_id, official_id, query_text, organizer_response, is_resolved, created_at")
+            .eq("is_resolved", False)
+            .order("created_at", desc=True)
+            .execute()
+        )
 
         queries = []
-        for row in response.data or []:
-            app_info = row.get("applications") or {}
-            event_info = app_info.get("events") or {}
-            if isinstance(event_info, list):
-                event_info = event_info[0] if event_info else {}
+        for query_row in queries_response.data or []:
+            routing_response = (
+                db.table("department_routings")
+                .select("id, app_id, department, status")
+                .eq("id", query_row.get("routing_id"))
+                .limit(1)
+                .execute()
+            )
+            routing_row = first_row(routing_response.data)
+            if not routing_row:
+                continue
+            if _normalize_department_name(routing_row.get("department")) != department:
+                continue
+
+            bundle = _fetch_application_bundle(str(routing_row.get("app_id")), department=None)
+            event_info = bundle.get("event") or {}
             queries.append(
                 {
-                    "app_id": row.get("app_id"),
-                    "application_status": app_info.get("status"),
+                    "query_id": query_row.get("id"),
+                    "app_id": routing_row.get("app_id"),
+                    "application_status": _normalize_routing_status(routing_row.get("status")),
                     "event_name": event_info.get("name"),
                     "location": event_info.get("raw_address"),
-                    "query_message": row.get("rejection_reason"),
-                    "updated_at": row.get("updated_at"),
+                    "query_message": query_row.get("query_text"),
+                    "organizer_response": query_row.get("organizer_response"),
+                    "created_at": query_row.get("created_at"),
+                    "is_resolved": query_row.get("is_resolved"),
                 }
             )
 

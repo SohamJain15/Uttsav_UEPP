@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.core.database import db
@@ -175,7 +175,7 @@ def _extract_candidate(payload: Dict[str, Any]) -> Dict[str, Any]:
     start_dt = _parse_datetime(str(start_date or ""), str(start_time or ""))
     end_dt = _parse_datetime(str(end_date or ""), str(end_time or ""))
     if start_dt is None:
-        start_dt = datetime.utcnow() + timedelta(days=1)
+        start_dt = datetime.now(UTC).replace(tzinfo=None) + timedelta(days=1)
     if end_dt is None or end_dt <= start_dt:
         end_dt = start_dt + timedelta(hours=4)
 
@@ -340,7 +340,9 @@ def forecast_approval_probability(payload: Dict[str, Any]) -> Dict[str, Any]:
     elif candidate["traffic_impact"] == "medium":
         traffic_penalty += 0.03
 
-    lead_time_days = (candidate["start_dt"].date() - datetime.utcnow().date()).days
+    lead_time_days = (
+        candidate["start_dt"].date() - datetime.now(UTC).date()
+    ).days
     lead_time_bonus = 0.0
     if lead_time_days >= 14:
         lead_time_bonus = 0.05
