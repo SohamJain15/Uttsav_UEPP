@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useForm } from "react-hook-form";
 
+const DRAFT_STORAGE_KEY = "uttsav_application_draft";
+
 const DEFAULT_VALUES = {
   eventName: "",
   eventType: "",
@@ -172,18 +174,30 @@ const createSharedFormData = (values = {}, documents = {}) => ({
   mapLocationUrl: values.mapLocationUrl || "",
 });
 
+const loadDraftData = () => {
+  try {
+    const savedDraft = localStorage.getItem(DRAFT_STORAGE_KEY);
+    if (savedDraft) {
+      return { ...DEFAULT_VALUES, ...JSON.parse(savedDraft) };
+    }
+  } catch (error) {
+    console.warn("Failed to load form draft from local storage", error);
+  }
+  return DEFAULT_VALUES;
+};
+
 export const useApplicationForm = () => {
   const [currentStep, setCurrentStep] = useState(0);
   const [uploadedDocuments, setUploadedDocuments] = useState({});
 
   const methods = useForm({
-    defaultValues: DEFAULT_VALUES,
+    defaultValues: loadDraftData(),
     mode: "onBlur",
   });
 
   const uploadedDocumentsRef = useRef(uploadedDocuments);
   const [formData, setFormData] = useState(() =>
-    createSharedFormData(DEFAULT_VALUES, uploadedDocuments)
+    createSharedFormData(methods.getValues(), uploadedDocuments)
   );
 
   useEffect(() => {
@@ -193,6 +207,8 @@ export const useApplicationForm = () => {
 
   useEffect(() => {
     const subscription = methods.watch((values) => {
+      // Actively save the user's progress to a local draft
+      localStorage.setItem(DRAFT_STORAGE_KEY, JSON.stringify(values));
       setFormData(createSharedFormData(values, uploadedDocumentsRef.current));
     });
 
@@ -205,6 +221,11 @@ export const useApplicationForm = () => {
   const nextStep = () => setCurrentStep((prev) => Math.min(prev + 1, FORM_STEPS.length - 1));
   const prevStep = () => setCurrentStep((prev) => Math.max(prev - 1, 0));
   const goToStep = (stepIndex) => setCurrentStep(Math.min(Math.max(stepIndex, 0), FORM_STEPS.length - 1));
+
+  const clearDraft = () => {
+    localStorage.removeItem(DRAFT_STORAGE_KEY);
+    methods.reset(DEFAULT_VALUES); // Reset the form UI back to default
+  };
 
   const setDocument = (key, fileName, fileObject) => {
     const normalizedName =
@@ -259,6 +280,7 @@ export const useApplicationForm = () => {
     nextStep,
     prevStep,
     goToStep,
+    clearDraft, // Exposing clearDraft
     eventSize,
     uploadedDocuments,
     formData,

@@ -83,6 +83,7 @@ const MultiStepForm = () => {
   const [routeCollision, setRouteCollision] = useState(null);
   const [isCollisionLoading, setIsCollisionLoading] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  
   const {
     methods,
     currentStep,
@@ -98,6 +99,7 @@ const MultiStepForm = () => {
     formData,
     updateMapLocation,
     buildSubmissionPayload,
+    clearDraft, // UPDATED: Extracted clearDraft from the hook
   } = useApplicationForm();
 
   const venueOwnership = methods.watch("venueOwnership");
@@ -340,6 +342,9 @@ const MultiStepForm = () => {
         createdApplication.requiredDepartments.length > 0
           ? createdApplication.requiredDepartments
           : determineDepartments(values);
+
+      // UPDATED: Wipe the draft from local storage because submission succeeded
+      clearDraft();
 
       setRiskAnalysis(latestRiskResult);
       setSubmittedApplication({
