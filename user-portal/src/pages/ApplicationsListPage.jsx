@@ -12,6 +12,8 @@ const ApplicationsListPage = () => {
     };
 
     loadApplications();
+    const intervalId = setInterval(loadApplications, 12000);
+    return () => clearInterval(intervalId);
   }, []);
 
   return (

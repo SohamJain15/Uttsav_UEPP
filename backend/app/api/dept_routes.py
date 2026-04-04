@@ -1,3 +1,4 @@
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -13,21 +14,216 @@ def _error_detail(exc: Exception, fallback: str) -> str:
     return str(getattr(exc, "message", None) or exc or fallback)
 
 
+def _normalize_department_name(raw_department: Any) -> Optional[str]:
+    normalized = str(raw_department or "").strip().lower()
+    if not normalized:
+        return None
+    if normalized in {"admin", "superadmin"}:
+        return "Admin"
+    if "police" in normalized:
+        return "Police"
+    if "fire" in normalized:
+        return "Fire"
+    if "traffic" in normalized:
+        return "Traffic"
+    if "municip" in normalized:
+        return "Municipality"
+    return str(raw_department).strip() or None
+
+
 def _resolve_department(current: Dict[str, Any]) -> Optional[str]:
     user_data = current["user"]
     metadata = user_data.get("user_metadata") or {}
-    department = metadata.get("department")
+    department = _normalize_department_name(metadata.get("department") or metadata.get("role"))
     if department:
         return department
 
     profile = fetch_user_profile(user_data["id"])
     if profile:
-        return profile.get("department")
+        profile_department = _normalize_department_name(
+            profile.get("department") or profile.get("role")
+        )
+        if profile_department:
+            return profile_department
     return None
 
 
 def _status_count(rows: List[Dict[str, Any]], expected_status: str) -> int:
     return sum(1 for row in rows if (row.get("status") or "").lower() == expected_status.lower())
+
+
+def _normalize_routing_status(raw_status: Any) -> str:
+    normalized = str(raw_status or "").strip().lower()
+    if normalized in {"approve", "approved"}:
+        return "Approved"
+    if normalized in {"reject", "rejected", "deny", "denied"}:
+        return "Rejected"
+    if normalized in {"query", "query raised", "query_raised"}:
+        return "Query Raised"
+    if normalized in {"in review", "in_review", "review"}:
+        return "In Review"
+    if normalized in {"pending", ""}:
+        return "Pending"
+    if normalized == "submitted":
+        return "Pending"
+    return str(raw_status or "Pending").strip() or "Pending"
+
+
+def _normalize_risk_level(raw_level: Any) -> str:
+    level = str(raw_level or "").strip().lower()
+    if "high" in level:
+        return "High"
+    if "low" in level:
+        return "Low"
+    return "Medium"
+
+
+def _derive_overall_status_from_routings(routing_rows: List[Dict[str, Any]]) -> str:
+    statuses = [_normalize_routing_status(row.get("status")) for row in routing_rows]
+    if not statuses:
+        return "Pending"
+    if any(status == "Rejected" for status in statuses):
+        return "Rejected"
+    if any(status == "Query Raised" for status in statuses):
+        return "Query Raised"
+    if all(status == "Approved" for status in statuses):
+        return "Approved"
+    if any(status == "In Review" for status in statuses):
+        return "In Review"
+    return "Pending"
+
+
+def _derive_due_at(submitted_at: Optional[str], default_hours: int = 72) -> str:
+    now = datetime.utcnow()
+    if submitted_at:
+        try:
+            base = datetime.fromisoformat(str(submitted_at).replace("Z", "+00:00")).replace(tzinfo=None)
+            return (base + timedelta(hours=default_hours)).isoformat()
+        except ValueError:
+            pass
+    return (now + timedelta(hours=default_hours)).isoformat()
+
+
+def _serialize_department_application(bundle: Dict[str, Any], department: Optional[str]) -> Dict[str, Any]:
+    application = bundle.get("application") or {}
+    event = bundle.get("event") or {}
+    routing_rows = list(bundle.get("department_routings") or [])
+    documents = list(bundle.get("documents") or [])
+
+    routing_rows.sort(key=lambda item: str(item.get("updated_at") or ""))
+
+    status_by_department: Dict[str, str] = {}
+    reviewed_at_by_department: Dict[str, Optional[str]] = {}
+    rejection_reason_by_department: Dict[str, str] = {}
+    query_by_department: Dict[str, Dict[str, str]] = {}
+    decision_history: List[Dict[str, str]] = []
+    required_departments: List[str] = []
+
+    for row in routing_rows:
+        department_name = str(row.get("department") or "").strip()
+        if not department_name:
+            continue
+        if department_name not in required_departments:
+            required_departments.append(department_name)
+
+        normalized_status = _normalize_routing_status(row.get("status"))
+        status_by_department[department_name] = normalized_status
+        reviewed_at_by_department[department_name] = row.get("updated_at")
+
+        reason = str(row.get("rejection_reason") or "").strip()
+        if normalized_status == "Rejected" and reason:
+            rejection_reason_by_department[department_name] = reason
+        if normalized_status == "Query Raised" and reason:
+            query_by_department[department_name] = {
+                "message": reason,
+                "raisedAt": str(row.get("updated_at") or ""),
+            }
+
+        if normalized_status not in {"Pending"}:
+            decision_history.append(
+                {
+                    "department": department_name,
+                    "action": normalized_status,
+                    "comment": reason or "-",
+                    "at": str(row.get("updated_at") or ""),
+                }
+            )
+
+    overall_status = _derive_overall_status_from_routings(routing_rows)
+    current_department_status = (
+        status_by_department.get(department, "Pending")
+        if department and department != "Admin"
+        else overall_status
+    )
+
+    crowd_size = int(event.get("expected_crowd") or 0)
+    risk_level = _normalize_risk_level(application.get("risk_level"))
+    risk_score = 75 if risk_level == "High" else 50 if risk_level == "Medium" else 30
+    area = str(event.get("city") or "").strip() or "Unknown Area"
+    pincode = str(event.get("pincode") or "").strip() or "000000"
+    venue = str(event.get("raw_address") or "").strip() or "Venue details pending"
+
+    focus_data = {
+        "Police": {
+            "crowdSize": f"{crowd_size}",
+            "securityPlanning": "Review crowd-marshalling and on-ground police deployment plan.",
+            "publicSafety": "Verify emergency response and barricading arrangements.",
+            "vipMovement": "Check VIP movement requirement and secure route plan.",
+        },
+        "Fire": {
+            "fireworks": "Confirm fireworks permit and on-site fire tender readiness.",
+            "temporaryStructures": "Inspect temporary stage/tent safety compliance.",
+            "exitSafety": "Ensure clear emergency exits and marked evacuation paths.",
+            "electricalSafety": "Validate safe electrical load and cable management.",
+        },
+        "Traffic": {
+            "roadClosure": "Confirm route closure/diversion approval requirements.",
+            "parking": "Verify parking plan, overflow handling, and entry-exit control.",
+            "trafficFlow": "Assess traffic impact and mitigation plan implementation status.",
+        },
+        "Municipality": {
+            "wasteManagement": "Check waste disposal plan and sanitation support.",
+            "publicSpaceUsage": "Validate public-space usage permissions and constraints.",
+            "foodStalls": "Verify food stall hygiene/municipal compliance readiness.",
+        },
+    }
+
+    return {
+        "id": application.get("app_id"),
+        "eventName": event.get("name") or "Unknown Event",
+        "eventType": event.get("category") or "General",
+        "venue": venue,
+        "date": str(event.get("start_time") or "")[:10],
+        "submittedAt": application.get("submitted_at"),
+        "updatedAt": max((row.get("updated_at") for row in routing_rows if row.get("updated_at")), default=None),
+        "organizerName": str(application.get("user_id") or "Organizer"),
+        "crowdSize": crowd_size,
+        "area": area,
+        "pincode": pincode,
+        "riskLevel": risk_level,
+        "requiredDepartments": required_departments,
+        "statusByDepartment": status_by_department,
+        "reviewedAtByDepartment": reviewed_at_by_department,
+        "overallStatus": overall_status,
+        "departmentStatus": current_department_status,
+        "dueAt": _derive_due_at(application.get("submitted_at")),
+        "documents": [
+            doc.get("file_name") or doc.get("document_url") or doc.get("storage_url")
+            for doc in documents
+        ],
+        "aiRiskBreakdown": {
+            "capacityUtilization": min(max(int(round((crowd_size / 2500) * 100)) if crowd_size else 20, 0), 100),
+            "exitSafetyRating": "Needs Review" if risk_level == "High" else "Moderate" if risk_level == "Medium" else "Strong",
+            "riskScore": risk_score,
+            "recommendation": "Prioritize route, crowd, and emergency checks before final approval."
+            if risk_level == "High"
+            else "Proceed with standard departmental verification checklist.",
+        },
+        "focusData": focus_data,
+        "queryByDepartment": query_by_department,
+        "rejectionReasonByDepartment": rejection_reason_by_department,
+        "decisionHistory": decision_history,
+    }
 
 
 def _fetch_application_bundle(app_id: str, department: Optional[str] = None) -> Dict[str, Any]:
@@ -52,13 +248,22 @@ def _fetch_application_bundle(app_id: str, department: Optional[str] = None) -> 
         routing_query = routing_query.eq("department", department)
     routing_response = routing_query.order("updated_at", desc=True).execute()
 
-    docs_response = (
-        db.table("documents")
-        .select("*")
-        .eq("app_id", app_id)
-        .order("created_at", desc=True)
-        .execute()
-    )
+    try:
+        docs_response = (
+            db.table("documents")
+            .select("*")
+            .eq("app_id", app_id)
+            .order("created_at", desc=True)
+            .execute()
+        )
+    except Exception:
+        docs_response = (
+            db.table("documents")
+            .select("*")
+            .eq("app_id", app_id)
+            .order("uploaded_at", desc=True)
+            .execute()
+        )
 
     return {
         "application": application,
@@ -68,38 +273,133 @@ def _fetch_application_bundle(app_id: str, department: Optional[str] = None) -> 
     }
 
 
+def _sync_application_status(app_id: str) -> str:
+    routing_response = db.table("department_routings").select("status").eq("app_id", app_id).execute()
+    routing_rows = routing_response.data or []
+    overall_status = _derive_overall_status_from_routings(routing_rows)
+    # Compatibility with enum-based schemas where "Pending"/"Query Raised" may be unsupported.
+    status_candidates = {
+        "Pending": ["Pending", "Submitted", "Draft"],
+        "In Review": ["In Review", "Submitted", "Pending"],
+        "Query Raised": ["Query", "In Review", "Submitted", "Pending"],
+        "Approved": ["Approved"],
+        "Rejected": ["Rejected"],
+    }.get(overall_status, [overall_status, "Submitted"])
+
+    for candidate in status_candidates:
+        try:
+            db.table("applications").update({"status": candidate}).eq("app_id", app_id).execute()
+            break
+        except Exception:
+            continue
+    return overall_status
+
+
+def _routing_department_candidates(department: str) -> List[str]:
+    base = _normalize_department_name(department) or str(department or "").strip()
+    candidates = [base]
+    if base and not base.lower().endswith("department"):
+        candidates.append(f"{base} Department")
+    return [item for item in dict.fromkeys(candidates) if item]
+
+
+@router.get("/api/dept/applications")
+async def get_current_department_applications(current=Depends(get_current_user)):
+    department = _resolve_department(current)
+    if not department:
+        raise HTTPException(status_code=400, detail="Unable to resolve department for current user")
+
+    try:
+        if department == "Admin":
+            app_rows = (
+                db.table("applications")
+                .select("app_id")
+                .order("submitted_at", desc=True)
+                .execute()
+                .data
+                or []
+            )
+            app_ids = [row.get("app_id") for row in app_rows if row.get("app_id")]
+        else:
+            routing_rows = []
+            for department_candidate in _routing_department_candidates(department):
+                try:
+                    candidate_rows = (
+                        db.table("department_routings")
+                        .select("app_id")
+                        .eq("department", department_candidate)
+                        .order("updated_at", desc=True)
+                        .execute()
+                        .data
+                        or []
+                    )
+                    if candidate_rows:
+                        routing_rows = candidate_rows
+                        break
+                except Exception:
+                    continue
+            app_ids = [row.get("app_id") for row in routing_rows if row.get("app_id")]
+
+        deduped_ids = list(dict.fromkeys(app_ids))
+        applications = []
+        for app_id in deduped_ids:
+            bundle = _fetch_application_bundle(app_id, department=None)
+            applications.append(_serialize_department_application(bundle, department=department))
+
+        return {
+            "status": "success",
+            "department": department,
+            "applications": applications,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=_error_detail(exc, "Failed to fetch department applications"),
+        ) from exc
+
+
 @router.get("/applications/{department_name}")
 async def get_department_applications(department_name: str, current=Depends(get_current_user)):
     """
-    Fetches applications specific to a department (e.g., 'Police', 'Fire').
+    Backward-compatible endpoint with compact department queue payload.
     """
     current_department = _resolve_department(current)
-    if current_department and current_department != department_name:
+    if current_department and current_department not in {"Admin", department_name}:
         raise HTTPException(status_code=403, detail="You are not allowed to access this department queue")
 
     try:
-        routings = db.table("department_routings").select(
-            "app_id, status, updated_at, applications(status, events(name, expected_crowd, raw_address))"
-        ).eq("department", department_name).execute()
+        routings = (
+            db.table("department_routings")
+            .select("app_id, status, updated_at, applications(status, events(name, expected_crowd, raw_address))")
+            .eq("department", department_name)
+            .execute()
+        )
 
         formatted_data = []
-        for route in routings.data:
+        for route in routings.data or []:
             app_info = route.get("applications") or {}
             event_info = app_info.get("events") or {}
-            formatted_data.append({
-                "id": route["app_id"],
-                "eventName": event_info.get("name", "Unknown"),
-                "crowdSize": event_info.get("expected_crowd", 0),
-                "location": event_info.get("raw_address", "Unknown"),
-                "departmentStatus": route["status"],
-                "overallStatus": app_info.get("status", "Pending"),
-                "lastUpdated": route["updated_at"]
-            })
+            if isinstance(event_info, list):
+                event_info = event_info[0] if event_info else {}
+
+            formatted_data.append(
+                {
+                    "id": route.get("app_id"),
+                    "eventName": event_info.get("name", "Unknown"),
+                    "crowdSize": event_info.get("expected_crowd", 0),
+                    "location": event_info.get("raw_address", "Unknown"),
+                    "departmentStatus": _normalize_routing_status(route.get("status")),
+                    "overallStatus": app_info.get("status", "Pending"),
+                    "lastUpdated": route.get("updated_at"),
+                }
+            )
 
         return {"status": "success", "data": formatted_data}
 
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to fetch department data: {str(e)}")
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch department data: {str(exc)}")
 
 
 @router.get("/api/dept/dashboard-stats")
@@ -109,19 +409,34 @@ async def get_dashboard_stats(current=Depends(get_current_user)):
         raise HTTPException(status_code=400, detail="Unable to resolve department for current user")
 
     try:
-        response = (
-            db.table("department_routings")
-            .select("app_id, status")
-            .eq("department", department)
-            .execute()
-        )
-        rows = response.data or []
+        if department == "Admin":
+            rows = db.table("department_routings").select("app_id, status").execute().data or []
+        else:
+            rows = []
+            for department_candidate in _routing_department_candidates(department):
+                try:
+                    candidate_rows = (
+                        db.table("department_routings")
+                        .select("app_id, status")
+                        .eq("department", department_candidate)
+                        .execute()
+                        .data
+                        or []
+                    )
+                    if candidate_rows:
+                        rows = candidate_rows
+                        break
+                except Exception:
+                    continue
+        normalized_rows = [{"status": _normalize_routing_status(row.get("status"))} for row in rows]
+
         return {
             "status": "success",
             "department": department,
-            "total_pending": _status_count(rows, "Pending"),
-            "total_approved": _status_count(rows, "Approve") + _status_count(rows, "Approved"),
-            "total_rejected": _status_count(rows, "Reject") + _status_count(rows, "Rejected"),
+            "total_pending": _status_count(normalized_rows, "Pending") + _status_count(normalized_rows, "In Review"),
+            "total_approved": _status_count(normalized_rows, "Approved"),
+            "total_rejected": _status_count(normalized_rows, "Rejected"),
+            "total_query_raised": _status_count(normalized_rows, "Query Raised"),
         }
     except Exception as exc:
         raise HTTPException(
@@ -134,10 +449,13 @@ async def get_dashboard_stats(current=Depends(get_current_user)):
 async def get_department_application_detail(app_id: str, current=Depends(get_current_user)):
     department = _resolve_department(current)
     try:
+        bundle = _fetch_application_bundle(app_id, department=None)
+        serialized = _serialize_department_application(bundle, department=department)
         return {
             "status": "success",
             "department": department,
-            "data": _fetch_application_bundle(app_id, department=department),
+            "application": serialized,
+            "data": bundle,
         }
     except HTTPException:
         raise
@@ -145,6 +463,72 @@ async def get_department_application_detail(app_id: str, current=Depends(get_cur
         raise HTTPException(
             status_code=500,
             detail=_error_detail(exc, "Failed to fetch application detail"),
+        ) from exc
+
+
+@router.post("/api/dept/applications/{app_id}/mark-in-review")
+async def mark_application_in_review(app_id: str, current=Depends(get_current_user)):
+    department = _resolve_department(current)
+    if not department or department == "Admin":
+        raise HTTPException(status_code=400, detail="Only department users can mark in-review status")
+
+    try:
+        row = None
+        matched_department = None
+        for department_candidate in _routing_department_candidates(department):
+            existing = (
+                db.table("department_routings")
+                .select("*")
+                .eq("app_id", app_id)
+                .eq("department", department_candidate)
+                .limit(1)
+                .execute()
+            )
+            row = first_row(existing.data)
+            if row:
+                matched_department = department_candidate
+                break
+        if not row:
+            raise HTTPException(status_code=404, detail="No routing record found for this department")
+
+        current_status = _normalize_routing_status(row.get("status"))
+        if current_status in {"Approved", "Rejected"}:
+            return {
+                "status": "success",
+                "message": f"Routing is already in final state: {current_status}",
+                "data": row,
+            }
+
+        if current_status != "In Review":
+            updated_row = None
+            for status_candidate in ["In Review", "Review", "Pending"]:
+                try:
+                    updated = (
+                        db.table("department_routings")
+                        .update({"status": status_candidate})
+                        .eq("app_id", app_id)
+                        .eq("department", matched_department or department)
+                        .execute()
+                    )
+                    updated_row = first_row(updated.data)
+                    if updated_row:
+                        break
+                except Exception:
+                    continue
+            row = updated_row or row
+            _sync_application_status(app_id)
+
+        return {
+            "status": "success",
+            "message": f"{department} marked application {app_id} as In Review",
+            "data": row,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=_error_detail(exc, "Failed to mark application in review"),
         ) from exc
 
 
@@ -157,29 +541,76 @@ async def update_department_action(
     department = _resolve_department(current)
     if not department:
         raise HTTPException(status_code=400, detail="Unable to resolve department for current user")
+    if department == "Admin":
+        raise HTTPException(status_code=403, detail="Admin role cannot issue department actions")
 
-    normalized_action = payload.action.strip().title()
-    if normalized_action not in {"Approve", "Reject", "Query"}:
-        raise HTTPException(status_code=400, detail="Action must be one of: Approve, Reject, Query")
+    action_value = str(payload.action or "").strip().lower()
+    action_map = {
+        "approve": "Approved",
+        "approved": "Approved",
+        "reject": "Rejected",
+        "rejected": "Rejected",
+        "query": "Query Raised",
+        "query raised": "Query Raised",
+    }
+    normalized_action = action_map.get(action_value)
+    if not normalized_action:
+        raise HTTPException(status_code=400, detail="Action must be one of: approve, reject, query")
 
+    reason = str(payload.rejection_reason or "").strip() or None
     try:
-        update_payload = {
-            "status": normalized_action,
-            "rejection_reason": payload.rejection_reason,
-        }
-        response = (
-            db.table("department_routings")
-            .update(update_payload)
-            .eq("app_id", app_id)
-            .eq("department", department)
-            .execute()
-        )
-        if not response.data:
+        action_status_candidates = {
+            "Approved": ["Approved"],
+            "Rejected": ["Rejected"],
+            "Query Raised": ["Query", "Query Raised", "In Review"],
+        }.get(normalized_action, [normalized_action])
+
+        target_department = None
+        for department_candidate in _routing_department_candidates(department):
+            exists = (
+                db.table("department_routings")
+                .select("id")
+                .eq("app_id", app_id)
+                .eq("department", department_candidate)
+                .limit(1)
+                .execute()
+            )
+            if first_row(exists.data):
+                target_department = department_candidate
+                break
+        if not target_department:
             raise HTTPException(status_code=404, detail="No routing record found for this department")
+
+        update_payload = {}
+        if normalized_action in {"Rejected", "Query Raised"}:
+            update_payload["rejection_reason"] = reason
+        else:
+            update_payload["rejection_reason"] = None
+
+        response = None
+        for status_candidate in action_status_candidates:
+            try:
+                candidate_payload = {**update_payload, "status": status_candidate}
+                response = (
+                    db.table("department_routings")
+                    .update(candidate_payload)
+                    .eq("app_id", app_id)
+                    .eq("department", target_department)
+                    .execute()
+                )
+                if response.data:
+                    break
+            except Exception:
+                continue
+        if not response or not response.data:
+            raise HTTPException(status_code=500, detail="Failed to persist department action due to status mismatch")
+
+        overall_status = _sync_application_status(app_id)
 
         return {
             "status": "success",
             "message": f"{department} marked application {app_id} as {normalized_action}",
+            "overall_status": overall_status,
             "data": first_row(response.data),
         }
     except HTTPException:
@@ -196,21 +627,45 @@ async def get_department_queries(current=Depends(get_current_user)):
     department = _resolve_department(current)
     if not department:
         raise HTTPException(status_code=400, detail="Unable to resolve department for current user")
+    if department == "Admin":
+        raise HTTPException(status_code=400, detail="Admin role is not scoped to a single department query queue")
 
     try:
-        response = (
-            db.table("department_routings")
-            .select("app_id, status, rejection_reason, updated_at, applications(status, events(name, raw_address))")
-            .eq("department", department)
-            .eq("status", "Query")
-            .order("updated_at", desc=True)
-            .execute()
-        )
+        response = None
+        status_filters = [["Query", "Query Raised"], ["Query"], ["Query Raised"]]
+        for department_candidate in _routing_department_candidates(department):
+            found = False
+            for status_filter in status_filters:
+                try:
+                    response = (
+                        db.table("department_routings")
+                        .select("app_id, status, rejection_reason, updated_at, applications(status, events(name, raw_address))")
+                        .eq("department", department_candidate)
+                        .in_("status", status_filter)
+                        .order("updated_at", desc=True)
+                        .execute()
+                    )
+                    if response.data is not None:
+                        found = True
+                        break
+                except Exception:
+                    continue
+            if found:
+                break
+        if response is None:
+            response = (
+                db.table("department_routings")
+                .select("app_id, status, rejection_reason, updated_at, applications(status, events(name, raw_address))")
+                .order("updated_at", desc=True)
+                .execute()
+            )
 
         queries = []
         for row in response.data or []:
             app_info = row.get("applications") or {}
             event_info = app_info.get("events") or {}
+            if isinstance(event_info, list):
+                event_info = event_info[0] if event_info else {}
             queries.append(
                 {
                     "app_id": row.get("app_id"),

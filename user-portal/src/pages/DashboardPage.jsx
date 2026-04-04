@@ -13,6 +13,8 @@ const DashboardPage = () => {
     };
 
     loadData();
+    const intervalId = setInterval(loadData, 12000);
+    return () => clearInterval(intervalId);
   }, []);
 
   const stats = useMemo(() => {

@@ -12,12 +12,13 @@ import { getSlaMeta } from '../utils/sla';
 
 const DashboardPage = () => {
   const { user } = useAuth();
+  const role = user?.role || '';
   const { searchQuery } = usePortalUi();
-  const { applications } = useDepartmentData(user?.role);
+  const { applications, isLoading, error } = useDepartmentData(role);
 
   const stats = applications.reduce(
     (acc, application) => {
-      const status = getDepartmentStatus(application, user.role);
+      const status = getDepartmentStatus(application, role);
 
       if (status === 'Pending') {
         acc.pending += 1;
@@ -31,7 +32,7 @@ const DashboardPage = () => {
         acc.rejected += 1;
       }
 
-      if (isDateToday(application.reviewedAtByDepartment?.[user.role])) {
+      if (isDateToday(application.reviewedAtByDepartment?.[role])) {
         acc.todayReviews += 1;
       }
 
@@ -42,7 +43,7 @@ const DashboardPage = () => {
 
   const pendingApplications = [...applications]
     .filter((application) => {
-      const status = getDepartmentStatus(application, user.role);
+      const status = getDepartmentStatus(application, role);
       return !['Approved', 'Rejected'].includes(status);
     })
     .filter((application) => matchesApplicationSearch(application, searchQuery))
@@ -50,7 +51,7 @@ const DashboardPage = () => {
 
   const highRiskCount = applications.filter((application) => application.riskLevel === 'High').length;
   const openQueryCount = applications.filter(
-    (application) => getDepartmentStatus(application, user.role) === 'Query Raised'
+    (application) => getDepartmentStatus(application, role) === 'Query Raised'
   ).length;
 
   return (
@@ -58,9 +59,21 @@ const DashboardPage = () => {
       <div>
         <h1 className="text-2xl font-bold text-textMain">Department Dashboard</h1>
         <p className="text-sm text-textSecondary">
-          Operational clearance control panel for {user.departmentLabel}
+          Operational clearance control panel for {user?.departmentLabel || 'Department Team'}
         </p>
       </div>
+
+      {isLoading ? (
+        <div className="rounded-xl border border-borderMain bg-cardBg p-3 text-sm text-textSecondary">
+          Refreshing live applications...
+        </div>
+      ) : null}
+
+      {error ? (
+        <div className="rounded-xl border border-statusRed/35 bg-statusRed/10 p-3 text-sm text-statusRed">
+          {error}
+        </div>
+      ) : null}
 
       <section className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
         <SummaryCard label="Pending" value={stats.pending} tone="pending" />
@@ -97,12 +110,12 @@ const DashboardPage = () => {
                       <p className="text-xs text-textSecondary">{application.id}</p>
                       <h3 className="text-lg font-semibold text-textMain">{application.eventName}</h3>
                       <p className="text-sm text-textSecondary">
-                        {application.venue} · {application.area}, {application.pincode}
+                        {application.venue} - {application.area}, {application.pincode}
                       </p>
                     </div>
                     <div className="flex flex-wrap items-center gap-3">
                       <RiskBadge riskLevel={application.riskLevel} />
-                      <RiskBadge riskLevel={getDepartmentStatus(application, user.role)} isStatus />
+                      <RiskBadge riskLevel={getDepartmentStatus(application, role)} isStatus />
                       <SLAChip dueAt={application.dueAt} />
                     </div>
                   </Link>
@@ -119,9 +132,19 @@ const DashboardPage = () => {
           <section className="rounded-2xl border border-borderMain bg-cardBg p-4 shadow-card">
             <h3 className="text-base font-semibold text-textMain">Operational Information</h3>
             <div className="mt-3 space-y-2 text-sm text-textSecondary">
-              <p>High-Risk Applications: <span className="font-semibold text-textMain">{highRiskCount}</span></p>
-              <p>Open Queries: <span className="font-semibold text-textMain">{openQueryCount}</span></p>
-              <p>Jurisdiction Clusters: <span className="font-semibold text-textMain">{new Set(applications.map((item) => item.pincode)).size}</span></p>
+              <p>
+                High-Risk Applications:{' '}
+                <span className="font-semibold text-textMain">{highRiskCount}</span>
+              </p>
+              <p>
+                Open Queries: <span className="font-semibold text-textMain">{openQueryCount}</span>
+              </p>
+              <p>
+                Jurisdiction Clusters:{' '}
+                <span className="font-semibold text-textMain">
+                  {new Set(applications.map((item) => item.pincode)).size}
+                </span>
+              </p>
             </div>
           </section>
         </div>

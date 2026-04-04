@@ -18,7 +18,9 @@ const LoginPage = () => {
       localStorage.setItem("uttsav_auth", JSON.stringify(response));
       navigate("/dashboard", { replace: true });
     } catch (error) {
-      setErrorMessage("Unable to sign in. Please try again.");
+      setErrorMessage(
+        error?.response?.data?.detail || "Unable to sign in. Please check your credentials and try again."
+      );
     } finally {
       setLoading(false);
     }

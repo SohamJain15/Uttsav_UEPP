@@ -1,31 +1,96 @@
 import api from "./api";
 import axios from "axios";
-import { dummyApplications } from "../data/dummyApplications";
 import { determineDepartments } from "../utils/determineDepartments";
 import { calculateRiskFromEvent } from "../utils/riskUtils";
 
-const STORAGE_KEY = "uttsav_submitted_applications";
-
-const readLocalApplications = () => {
-  const raw = localStorage.getItem(STORAGE_KEY);
-  if (!raw) return [];
-
-  try {
-    return JSON.parse(raw);
-  } catch (error) {
-    return [];
-  }
+const normalizeStatus = (rawStatus) => {
+  const status = String(rawStatus || "").trim().toLowerCase();
+  if (status === "approved" || status === "approve") return "Approved";
+  if (status === "rejected" || status === "reject" || status === "denied") return "Rejected";
+  if (status === "query" || status === "query raised") return "Query Raised";
+  if (status === "in review" || status === "in_review" || status === "review") return "In Review";
+  return "Pending";
 };
 
-const writeLocalApplications = (applications) => {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(applications));
+const normalizeRiskLevel = (rawRisk) => {
+  const risk = String(rawRisk || "").trim().toLowerCase();
+  if (risk.includes("high")) return "High";
+  if (risk.includes("low")) return "Low";
+  return "Medium";
 };
 
-const mergeWithLocalData = () => {
-  const local = readLocalApplications();
-  const localArray = Array.isArray(local) ? local : [];
-  return [...localArray, ...dummyApplications];
+const normalizeDepartments = (departments = []) =>
+  (Array.isArray(departments) ? departments : [])
+    .filter((department) => department?.name || department?.department)
+    .map((department) => ({
+      name: department.name || department.department || "Department",
+      status: normalizeStatus(department.status),
+      reason: department.reason || department.rejection_reason || "",
+      updatedAt: department.updatedAt || department.updated_at || null,
+    }));
+
+const buildTimelineFromDepartments = (departments = []) => [
+  { label: "Application Submitted", status: "Approved" },
+  ...departments.map((department) => ({
+    label: department.name,
+    status: department.status,
+  })),
+];
+
+const normalizeApplicationListItem = (item = {}) => {
+  const departments = normalizeDepartments(item.departments);
+  return {
+    id: item.id || item.app_id || "",
+    eventName: item.eventName || item.event_name || "Unknown Event",
+    eventType: item.eventType || item.event_type || "Unknown",
+    crowdSize: Number(item.crowdSize || item.crowd_size || 0),
+    venueType: item.venueType || item.venue_type || "",
+    venueAddress: item.address || item.raw_address || "",
+    address: item.address || item.raw_address || "",
+    status: normalizeStatus(item.status),
+    submittedAt: item.submittedAt || item.submitted_at || "",
+    eventDate: item.eventDate || item.start_date || item.submittedAt || item.submitted_at || "",
+    riskLevel: normalizeRiskLevel(item.riskLevel || item.risk_level),
+    departments,
+    timeline: buildTimelineFromDepartments(departments),
+  };
 };
+
+const toIsoDateTime = (dateValue, timeValue) => {
+  if (!dateValue) return "";
+  const timePart = (timeValue || "00:00").slice(0, 5);
+  return `${dateValue}T${timePart}:00`;
+};
+
+const buildSubmitPayload = (payload = {}) => ({
+  event_name: payload.eventName || payload.event_name || "",
+  event_type: payload.eventType || payload.event_type || "",
+  crowd_size: Number(payload.crowdSize || payload.crowd_size || 0),
+  start_date: toIsoDateTime(payload.startDate || payload.start_date, payload.startTime || payload.start_time),
+  end_date: toIsoDateTime(payload.endDate || payload.end_date, payload.endTime || payload.end_time),
+  venue_name: payload.venueName || payload.venue_name || "",
+  venue_type: payload.venueType || payload.venue_type || "",
+  venue_ownership: payload.venueOwnership || payload.venue_ownership || "",
+  address: payload.address || "",
+  city: payload.city || "",
+  pincode: payload.pincode || "110001",
+  map_latitude:
+    payload.mapLatitude !== undefined && payload.mapLatitude !== ""
+      ? Number(payload.mapLatitude)
+      : payload.map_latitude !== undefined && payload.map_latitude !== ""
+        ? Number(payload.map_latitude)
+        : null,
+  map_longitude:
+    payload.mapLongitude !== undefined && payload.mapLongitude !== ""
+      ? Number(payload.mapLongitude)
+      : payload.map_longitude !== undefined && payload.map_longitude !== ""
+        ? Number(payload.map_longitude)
+        : null,
+  has_fireworks: Boolean(payload.fireworks || payload.has_fireworks),
+  has_loudspeakers: Boolean(payload.soundSystem || payload.has_loudspeakers),
+  is_moving_procession: Boolean(payload.isMovingProcession || payload.is_moving_procession),
+  food_stalls: Boolean(payload.foodStalls || payload.food_stalls),
+});
 
 const normalizeRiskResponse = (responseData = {}, originalPayload = {}) => {
   const responseLevel =
@@ -33,8 +98,7 @@ const normalizeRiskResponse = (responseData = {}, originalPayload = {}) => {
 
   return {
     level: String(responseLevel || "Medium"),
-    confidence:
-      typeof responseData.confidence === "number" ? responseData.confidence : null,
+    confidence: typeof responseData.confidence === "number" ? responseData.confidence : null,
     aiRecommendation:
       responseData.ai_recommendation ||
       responseData.aiRecommendation ||
@@ -209,102 +273,119 @@ const normalizeCollisionResponse = (data = {}) => ({
   modelVersion: data.model_version || data.modelVersion || "",
 });
 
+const normalizeApplicationDetail = (payload = {}) => {
+  const root = payload?.data || payload;
+  const application = root?.application || {};
+  const event = root?.event || {};
+  const departments = normalizeDepartments(root?.departments || root?.department_routings || []);
+  const timeline = buildTimelineFromDepartments(departments);
+
+  const queryByDepartment = {};
+  const rejectionReasonByDepartment = {};
+  departments.forEach((department) => {
+    if (department.status === "Query Raised" && department.reason) {
+      queryByDepartment[department.name] = {
+        message: department.reason,
+        raisedAt: department.updatedAt || "",
+      };
+    }
+    if (department.status === "Rejected" && department.reason) {
+      rejectionReasonByDepartment[department.name] = department.reason;
+    }
+  });
+
+  return {
+    id: application.app_id || payload?.id || "",
+    eventName: event.name || "Unknown Event",
+    eventType: event.category || "General",
+    crowdSize: Number(event.expected_crowd || 0),
+    venueAddress: event.raw_address || "",
+    venueType: event.venue_type || "",
+    eventDate: event.start_time || application.submitted_at || "",
+    submittedAt: application.submitted_at || "",
+    updatedAt: departments[0]?.updatedAt || application.submitted_at || "",
+    status: normalizeStatus(application.status),
+    riskLevel: normalizeRiskLevel(application.risk_level),
+    departments,
+    timeline,
+    requiredDepartments: departments.map((item) => item.name),
+    statusByDepartment: departments.reduce((acc, item) => {
+      acc[item.name] = item.status;
+      return acc;
+    }, {}),
+    queryByDepartment,
+    rejectionReasonByDepartment,
+  };
+};
+
+const getErrorMessage = (error, fallback) =>
+  error?.response?.data?.detail || error?.message || fallback;
+
 export const applicationService = {
   async createApplication(payload) {
-    try {
-      const response = await api.post("/applications", payload);
-      return response.data;
-    } catch (error) {
-      const departments = determineDepartments(payload);
-      const riskLevel = calculateRiskFromEvent(payload);
-      const applicationId = `UTTSAV-${Math.floor(2000 + Math.random() * 8000)}`;
+    const submitPayload = buildSubmitPayload(payload);
+    const response = await api.post("/api/user/submit-application", submitPayload);
+    const applicationId = response.data?.application_id || response.data?.id;
 
-      const mockApplication = {
-        id: applicationId,
-        ...payload,
-        riskLevel,
-        departments: departments.map((item) => ({
-          name: item.name,
-          reason: item.reason,
-          status: "Pending",
-        })),
-        status: "Pending",
-        submittedAt: new Date().toISOString(),
-        timeline: [
-          { label: "Application Submitted", status: "Approved" },
-          ...departments.map((item) => ({ label: item.name, status: "Pending" })),
-        ],
-      };
-
-      const current = readLocalApplications();
-      writeLocalApplications([mockApplication, ...current]);
-
-      return mockApplication;
+    if (!applicationId) {
+      throw new Error("Application submitted but backend did not return an application id.");
     }
+
+    const createdApplication = await this.getApplicationById(applicationId);
+    if (createdApplication?.id) {
+      return createdApplication;
+    }
+
+    return normalizeApplicationListItem({
+      id: applicationId,
+      eventName: payload.eventName,
+      eventType: payload.eventType,
+      crowdSize: payload.crowdSize,
+      status: "Pending",
+      submittedAt: new Date().toISOString(),
+      address: payload.address,
+    });
   },
 
   async getApplications() {
     try {
-      const response = await api.get("/applications");
+      const response = await api.get("/api/user/applications");
       const payload = response.data;
 
-      if (Array.isArray(payload)) {
-        return payload;
-      }
+      const list = Array.isArray(payload)
+        ? payload
+        : Array.isArray(payload?.items)
+          ? payload.items
+          : Array.isArray(payload?.data)
+            ? payload.data
+            : [];
 
-      if (Array.isArray(payload?.items)) {
-        return payload.items;
-      }
-
-      return mergeWithLocalData();
+      return list.map((item) => normalizeApplicationListItem(item));
     } catch (error) {
-      return mergeWithLocalData();
+      return [];
     }
   },
 
   async getApplicationById(id) {
     try {
-      const response = await api.get(`/applications/${id}`);
-      const payload = response.data;
-
-      if (payload && typeof payload === "object" && !Array.isArray(payload)) {
-        return payload;
-      }
-
-      if (payload?.item && typeof payload.item === "object") {
-        return payload.item;
-      }
-
-      return null;
+      const response = await api.get(`/api/user/applications/${id}`);
+      return normalizeApplicationDetail(response.data);
     } catch (error) {
-      const all = mergeWithLocalData();
-      return all.find((application) => application.id === id) || null;
+      return null;
     }
   },
 
   async uploadDocument(formData) {
-    try {
-      const response = await api.post("/documents/upload", formData, {
-        headers: {
-          "Content-Type": "multipart/form-data",
-        },
-      });
-      return response.data;
-    } catch (error) {
-      return {
-        message: "Mock upload successful",
-        fileUrl: "/mock/documents/file.pdf",
-      };
-    }
+    const response = await api.post("/api/documents/upload", formData, {
+      headers: {
+        "Content-Type": "multipart/form-data",
+      },
+    });
+    return response.data;
   },
 
   async determineRoutingDepartments(payload) {
-    try {
-      const response = await api.post("/routing/determine-departments", payload);
-      return response.data;
-    } catch (error) {
-      return determineDepartments(payload);
-    }
+    return determineDepartments(payload);
   },
 
   async calculateRisk(payload) {
@@ -324,7 +405,7 @@ export const applicationService = {
     }
 
     try {
-      const response = await api.post("/risk/calculate", riskPayload);
+      const response = await api.post("/api/user/risk/calculate", riskPayload);
       return normalizeRiskResponse(response.data, payload);
     } catch (error) {
       return {
@@ -434,5 +515,9 @@ export const applicationService = {
       thresholds: {},
       modelVersion: "fallback-v0",
     };
+  },
+
+  getErrorMessage(error, fallback = "Request failed.") {
+    return getErrorMessage(error, fallback);
   },
 };

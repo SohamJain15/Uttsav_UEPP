@@ -25,18 +25,233 @@ def _serialize_user(user: Any) -> Dict[str, Any]:
     }
 
 
-def _build_profile_payload(user_id: str, email: Optional[str], payload: Dict[str, Any]) -> Dict[str, Any]:
-    profile_payload = {"id": user_id, "email": email}
-    for key in ("full_name", "phone_number", "organization", "department"):
-        value = payload.get(key)
-        if value is not None:
-            profile_payload[key] = value
-    return profile_payload
+def _normalize_department(value: Any) -> str:
+    normalized = str(value or "").strip().lower()
+    if not normalized:
+        return "Organizer"
+    if normalized in {"admin", "superadmin"}:
+        return "Admin"
+    if "police" in normalized:
+        return "Police"
+    if "fire" in normalized:
+        return "Fire"
+    if "traffic" in normalized:
+        return "Traffic"
+    if "municip" in normalized:
+        return "Municipality"
+    if "organizer" in normalized or "applicant" in normalized or "user" in normalized:
+        return "Organizer"
+    return str(value).strip() or "Organizer"
+
+
+def _prefix_for_department(department: str) -> Optional[str]:
+    mapping = {
+        "Police": "P",
+        "Fire": "FB",
+        "Traffic": "T",
+        "Municipality": "M",
+        "Admin": "A",
+        "Organizer": "U",
+    }
+    return mapping.get(department)
+
+
+def _department_from_username(username: str) -> Optional[str]:
+    normalized = str(username or "").strip().upper()
+    if not normalized:
+        return None
+    compact = normalized.replace("-", "")
+    if compact.startswith("FB"):
+        return "Fire"
+    if compact.startswith("P"):
+        return "Police"
+    if compact.startswith("T"):
+        return "Traffic"
+    if compact.startswith("M"):
+        return "Municipality"
+    if compact.startswith("A"):
+        return "Admin"
+    if compact.startswith("U"):
+        return "Organizer"
+    return None
+
+
+def _normalize_username(username: Any) -> str:
+    return str(username or "").strip().upper()
+
+
+def _generate_username(user_id: str, department: str) -> str:
+    prefix = _prefix_for_department(department) or "U"
+    suffix = str(user_id).replace("-", "").upper()[:6]
+    return f"{prefix}-{suffix}"
+
+
+def _resolve_login_email(identifier: str) -> str:
+    raw_identifier = str(identifier or "").strip()
+    if not raw_identifier:
+        raise HTTPException(status_code=400, detail="Username or email is required.")
+
+    if "@" in raw_identifier:
+        return raw_identifier
+
+    username = _normalize_username(raw_identifier)
+    username_department = _department_from_username(username)
+    if not username_department:
+        raise HTTPException(
+            status_code=400,
+            detail="Department username must start with P, T, FB, or M.",
+        )
+
+    candidates = [username]
+    compact = username.replace("-", "")
+    if compact not in candidates:
+        candidates.append(compact)
+
+    selected_user = None
+    for candidate in candidates:
+        try:
+            query = db.table("users").select("email, role, prefix").eq("prefix", candidate).limit(1).execute()
+            row = first_row(query.data)
+            if row:
+                selected_user = row
+                break
+        except Exception:
+            continue
+
+    if not selected_user:
+        for candidate in candidates:
+            try:
+                query = (
+                    db.table("users")
+                    .select("email, role, prefix")
+                    .ilike("prefix", f"{candidate}%")
+                    .limit(1)
+                    .execute()
+                )
+                row = first_row(query.data)
+                if row:
+                    selected_user = row
+                    break
+            except Exception:
+                continue
+
+    if not selected_user or not selected_user.get("email"):
+        raise HTTPException(status_code=404, detail="Department username not found.")
+
+    stored_role = _normalize_department(selected_user.get("role"))
+    if stored_role != username_department:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Username prefix does not match stored department role ({stored_role}).",
+        )
+
+    return str(selected_user["email"])
+
+
+def _enrich_profile(profile: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if not profile:
+        return profile
+    enriched = dict(profile)
+    if not enriched.get("department") and enriched.get("role"):
+        enriched["department"] = _normalize_department(enriched.get("role"))
+    if not enriched.get("full_name") and enriched.get("name"):
+        enriched["full_name"] = enriched.get("name")
+    if not enriched.get("phone_number") and enriched.get("phone"):
+        enriched["phone_number"] = enriched.get("phone")
+    if not enriched.get("organization") and enriched.get("organization_type"):
+        enriched["organization"] = enriched.get("organization_type")
+    if not enriched.get("username") and enriched.get("prefix"):
+        enriched["username"] = enriched.get("prefix")
+    return enriched
+
+
+def _fetch_profile_by_user_or_email(user_id: Optional[str], email: Optional[str]) -> Optional[Dict[str, Any]]:
+    if user_id:
+        profile = fetch_user_profile(user_id)
+        if profile:
+            return _enrich_profile(profile)
+
+    if email:
+        try:
+            by_email = db.table("users").select("*").eq("email", email).limit(1).execute()
+            row = first_row(by_email.data)
+            if row:
+                return _enrich_profile(row)
+        except Exception:
+            return None
+    return None
+
+
+def _user_payload_candidates(user_id: str, email: str, payload: Dict[str, Any]) -> list[Dict[str, Any]]:
+    department = _normalize_department(payload.get("department"))
+    username = _normalize_username(payload.get("username") or _generate_username(user_id, department))
+    return [
+        # Candidate for current Supabase schema shared by user.
+        {
+            "id": user_id,
+            "email": email,
+            "name": payload.get("full_name"),
+            "phone": payload.get("phone_number"),
+            "organization_type": payload.get("organization"),
+            "role": department,
+            "prefix": username,
+            "is_active": True,
+        },
+        # Backward-compatible candidate for previous project schema.
+        {
+            "id": user_id,
+            "email": email,
+            "full_name": payload.get("full_name"),
+            "phone_number": payload.get("phone_number"),
+            "organization": payload.get("organization"),
+            "department": department,
+        },
+        # Minimal fallback.
+        {
+            "id": user_id,
+            "email": email,
+        },
+    ]
+
+
+def _upsert_user_profile(user_id: str, email: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    last_error: Optional[Exception] = None
+    for candidate in _user_payload_candidates(user_id, email, payload):
+        candidate_payload = {k: v for k, v in candidate.items() if v is not None}
+        try:
+            response = db.table("users").upsert(candidate_payload).execute()
+            profile = first_row(response.data)
+            if profile:
+                return _enrich_profile(profile) or candidate_payload
+
+            fetched = _fetch_profile_by_user_or_email(user_id=user_id, email=email)
+            if fetched:
+                return fetched
+            return _enrich_profile(candidate_payload) or candidate_payload
+        except Exception as exc:
+            last_error = exc
+            continue
+
+    raise HTTPException(
+        status_code=500,
+        detail=_error_detail(last_error or Exception("Unknown users upsert error"), "Failed to sync user profile"),
+    )
 
 
 @router.post("/api/auth/register")
 async def register_user(payload: AuthRegisterRequest):
     try:
+        department = _normalize_department(payload.department)
+        username = _normalize_username(payload.username)
+        if username:
+            username_department = _department_from_username(username)
+            if username_department != department:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Username prefix does not match department {department}.",
+                )
+        else:
+            username = ""
         auth_response = db.auth.admin.create_user(
             {
                 "email": payload.email,
@@ -46,7 +261,9 @@ async def register_user(payload: AuthRegisterRequest):
                     "full_name": payload.full_name,
                     "phone_number": payload.phone_number,
                     "organization": payload.organization,
-                    "department": payload.department,
+                    "department": department,
+                    "role": department,
+                    "username": username or None,
                 },
             }
         )
@@ -55,13 +272,17 @@ async def register_user(payload: AuthRegisterRequest):
         if not user_id:
             raise HTTPException(status_code=500, detail="Supabase did not return a created user id")
 
-        profile_payload = _build_profile_payload(
+        profile = _upsert_user_profile(
             user_id=user_id,
             email=payload.email,
-            payload=payload.model_dump(exclude={"password"}),
+            payload={
+                "full_name": payload.full_name,
+                "phone_number": payload.phone_number,
+                "organization": payload.organization,
+                "department": department,
+                "username": username or None,
+            },
         )
-        db.table("users").upsert(profile_payload).execute()
-        profile = fetch_user_profile(user_id) or profile_payload
 
         return {
             "status": "success",
@@ -78,8 +299,9 @@ async def register_user(payload: AuthRegisterRequest):
 @router.post("/api/auth/login")
 async def login_user(credentials: UserCredentials):
     try:
+        login_email = _resolve_login_email(credentials.email)
         response = db.auth.sign_in_with_password(
-            {"email": credentials.email, "password": credentials.password}
+            {"email": login_email, "password": credentials.password}
         )
         session = getattr(response, "session", None)
         token = getattr(session, "access_token", None)
@@ -88,7 +310,19 @@ async def login_user(credentials: UserCredentials):
         if not token:
             raise HTTPException(status_code=401, detail="Login failed: no access token returned")
 
-        profile = fetch_user_profile(user_data.get("id")) if user_data.get("id") else None
+        metadata = (getattr(response.user, "user_metadata", None) or {}) if getattr(response, "user", None) else {}
+        profile = _fetch_profile_by_user_or_email(user_data.get("id"), user_data.get("email"))
+        if profile is None:
+            profile = {
+                "id": user_data.get("id"),
+                "email": user_data.get("email"),
+                "full_name": metadata.get("full_name"),
+                "phone_number": metadata.get("phone_number"),
+                "organization": metadata.get("organization"),
+                "department": _normalize_department(metadata.get("department") or metadata.get("role")),
+            }
+        profile = _enrich_profile(profile)
+
         return {
             "status": "success",
             "message": "Login successful",
@@ -106,11 +340,11 @@ async def login_user(credentials: UserCredentials):
 @router.get("/api/user/profile")
 async def get_profile(current=Depends(get_current_user)):
     user_data = current["user"]
-    profile = fetch_user_profile(user_data["id"])
+    profile = _fetch_profile_by_user_or_email(user_data.get("id"), user_data.get("email"))
     return {
         "status": "success",
         "user": user_data,
-        "profile": profile or {"id": user_data["id"], "email": user_data.get("email")},
+        "profile": profile or {"id": user_data.get("id"), "email": user_data.get("email")},
     }
 
 
@@ -121,16 +355,36 @@ async def update_profile(payload: UserProfileUpdateRequest, current=Depends(get_
 
     try:
         if not update_data:
-            profile = fetch_user_profile(user_data["id"])
+            profile = _fetch_profile_by_user_or_email(user_data.get("id"), user_data.get("email"))
             return {
                 "status": "success",
                 "message": "No profile changes supplied",
-                "profile": profile or {"id": user_data["id"], "email": user_data.get("email")},
+                "profile": profile or {"id": user_data.get("id"), "email": user_data.get("email")},
             }
 
-        update_data.update({"id": user_data["id"], "email": user_data.get("email")})
-        response = db.table("users").upsert(update_data).execute()
-        profile = first_row(response.data) or fetch_user_profile(user_data["id"]) or update_data
+        existing = _fetch_profile_by_user_or_email(user_data.get("id"), user_data.get("email")) or {}
+        merged = {
+            "full_name": update_data.get("full_name")
+            or existing.get("full_name")
+            or existing.get("name"),
+            "phone_number": update_data.get("phone_number")
+            or existing.get("phone_number")
+            or existing.get("phone"),
+            "organization": update_data.get("organization")
+            or existing.get("organization")
+            or existing.get("organization_type"),
+            "department": update_data.get("department")
+            or existing.get("department")
+            or existing.get("role")
+            or "Organizer",
+            "username": existing.get("username") or existing.get("prefix"),
+        }
+
+        profile = _upsert_user_profile(
+            user_id=user_data["id"],
+            email=user_data.get("email") or existing.get("email") or "",
+            payload=merged,
+        )
 
         return {
             "status": "success",

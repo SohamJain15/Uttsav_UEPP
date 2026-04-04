@@ -73,6 +73,8 @@ const StepHeader = ({ title, subtitle }) => (
 const MultiStepForm = () => {
   const navigate = useNavigate();
   const [documentError, setDocumentError] = useState("");
+  const [submissionError, setSubmissionError] = useState("");
+  const [uploadWarning, setUploadWarning] = useState("");
   const [submittedApplication, setSubmittedApplication] = useState(null);
   const [riskAnalysis, setRiskAnalysis] = useState(null);
   const [isRiskLoading, setIsRiskLoading] = useState(false);
@@ -80,6 +82,7 @@ const MultiStepForm = () => {
   const [isApprovalLoading, setIsApprovalLoading] = useState(false);
   const [routeCollision, setRouteCollision] = useState(null);
   const [isCollisionLoading, setIsCollisionLoading] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
   const {
     methods,
     currentStep,
@@ -288,26 +291,72 @@ const MultiStepForm = () => {
       return;
     }
 
-    const latestRiskResult = riskAnalysis || (await applicationService.calculateRisk(values));
-    const normalizedRiskLevel = `${String(latestRiskResult?.level || "Medium").toUpperCase()} RISK`;
+    setSubmissionError("");
+    setUploadWarning("");
+    setIsSubmitting(true);
 
-    const generatedId = `UTTSAV-${Math.floor(2000 + Math.random() * 7000)}`;
-    const departmentsRequired = determineDepartments(values);
-    const basePayload = buildSubmissionPayload(values);
+    try {
+      const latestRiskResult = riskAnalysis || (await applicationService.calculateRisk(values));
+      const normalizedRiskLevel = `${String(latestRiskResult?.level || "Medium").toUpperCase()} RISK`;
+      const basePayload = buildSubmissionPayload(values);
 
-    const payload = {
-      ...basePayload,
-      eventSize,
-      departmentsRequired,
-      riskLevel: normalizedRiskLevel,
-      aiRiskAnalysis: latestRiskResult,
-      approvalForecast: approvalPrediction,
-      routeCollisionForecast: routeCollision,
-      id: generatedId,
-    };
+      const createdApplication = await applicationService.createApplication({
+        ...basePayload,
+        eventSize,
+        aiRiskAnalysis: latestRiskResult,
+        approvalForecast: approvalPrediction,
+        routeCollisionForecast: routeCollision,
+      });
 
-    setRiskAnalysis(latestRiskResult);
-    setSubmittedApplication(payload);
+      const createdApplicationId = createdApplication?.id;
+      if (!createdApplicationId) {
+        throw new Error("Application was created, but tracking id is unavailable.");
+      }
+
+      const uploadQueue = Object.entries(uploadedDocuments)
+        .map(([key, value]) => ({ key, file: value?.file, name: value?.name }))
+        .filter((entry) => entry.file instanceof File);
+
+      if (uploadQueue.length > 0) {
+        const uploadResults = await Promise.allSettled(
+          uploadQueue.map((entry) => {
+            const formData = new FormData();
+            formData.append("app_id", createdApplicationId);
+            formData.append("file", entry.file, entry.name || entry.file.name);
+            return applicationService.uploadDocument(formData);
+          })
+        );
+
+        const failedUploads = uploadResults.filter((result) => result.status === "rejected");
+        if (failedUploads.length > 0) {
+          setUploadWarning(
+            `Application submitted, but ${failedUploads.length} document upload(s) failed. You can re-upload them from Documents.`
+          );
+        }
+      }
+
+      const departmentsRequired =
+        Array.isArray(createdApplication?.requiredDepartments) &&
+        createdApplication.requiredDepartments.length > 0
+          ? createdApplication.requiredDepartments
+          : determineDepartments(values);
+
+      setRiskAnalysis(latestRiskResult);
+      setSubmittedApplication({
+        id: createdApplicationId,
+        riskLevel: normalizedRiskLevel,
+        departmentsRequired,
+      });
+    } catch (error) {
+      setSubmissionError(
+        applicationService.getErrorMessage(
+          error,
+          "Failed to submit the application. Please verify backend connectivity and try again."
+        )
+      );
+    } finally {
+      setIsSubmitting(false);
+    }
   });
 
   if (submittedApplication) {
@@ -337,12 +386,18 @@ const MultiStepForm = () => {
             <div className="mt-5">
               <p className="text-xs uppercase tracking-wide text-[#64748B]">Departments Required</p>
               <div className="mt-2 flex flex-wrap gap-2">
-                {submittedApplication.departmentsRequired.map((department) => (
+                {(submittedApplication.departmentsRequired || []).map((department) => (
                   <DepartmentBadge key={department} label={department} />
                 ))}
               </div>
             </div>
           </article>
+
+          {uploadWarning ? (
+            <p className="mt-4 rounded-lg border border-[#FDE68A] bg-[#FFFBEB] px-4 py-3 text-sm text-[#92400E]">
+              {uploadWarning}
+            </p>
+          ) : null}
 
           <button
             type="button"
@@ -1056,11 +1111,17 @@ const MultiStepForm = () => {
             formContext={methods.getValues()}
           />
 
+          {submissionError ? (
+            <p className="mt-5 rounded-lg border border-[#FECACA] bg-[#FEF2F2] px-4 py-3 text-sm text-[#B91C1C]">
+              {submissionError}
+            </p>
+          ) : null}
+
           <div className="mt-8 flex items-center justify-between border-t border-gray-200 pt-5">
             <button
               type="button"
               onClick={prevStep}
-              disabled={isFirstStep}
+              disabled={isFirstStep || isSubmitting}
               className="rounded-lg border border-gray-300 px-5 py-2.5 text-sm font-semibold text-[#0F172A] transition hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
             >
               Previous
@@ -1069,15 +1130,16 @@ const MultiStepForm = () => {
             {isLastStep ? (
               <button
                 type="submit"
-                className="rounded-lg bg-[#1E40AF] px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-[#1D4ED8]"
+                disabled={isSubmitting}
+                className="rounded-lg bg-[#1E40AF] px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-[#1D4ED8] disabled:cursor-not-allowed disabled:opacity-70"
               >
-                Submit
+                {isSubmitting ? "Submitting..." : "Submit"}
               </button>
             ) : (
               <button
                 type="button"
                 onClick={handleNext}
-                disabled={isRiskLoading}
+                disabled={isRiskLoading || isSubmitting}
                 className="rounded-lg bg-[#1E40AF] px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-[#1D4ED8] disabled:cursor-not-allowed disabled:opacity-70"
               >
                 {currentStep === 6 && isRiskLoading ? "Analyzing Risk..." : "Next"}

@@ -6,13 +6,17 @@ import { authService } from "../services/authService";
 const RegisterPage = () => {
   const navigate = useNavigate();
   const [loading, setLoading] = useState(false);
+  const [errorMessage, setErrorMessage] = useState("");
   const { register, handleSubmit } = useForm();
 
   const onSubmit = async (values) => {
     setLoading(true);
+    setErrorMessage("");
     try {
       await authService.register(values);
       navigate("/login", { replace: true });
+    } catch (error) {
+      setErrorMessage(error?.response?.data?.detail || "Registration failed. Please verify details and retry.");
     } finally {
       setLoading(false);
     }
@@ -45,6 +49,15 @@ const RegisterPage = () => {
             <input className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" {...register("phone", { required: true })} />
           </label>
 
+          <label className="text-[13px] font-medium text-textSecondary">
+            Department
+            <input
+              className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+              placeholder="Organizer"
+              {...register("department")}
+            />
+          </label>
+
           <label className="text-[13px] font-medium text-textSecondary md:col-span-2">
             Password
             <input
@@ -53,6 +66,10 @@ const RegisterPage = () => {
               {...register("password", { required: true })}
             />
           </label>
+
+          {errorMessage ? (
+            <p className="text-sm text-danger md:col-span-2">{errorMessage}</p>
+          ) : null}
 
           <div className="md:col-span-2">
             <button

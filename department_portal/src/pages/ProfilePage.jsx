@@ -10,10 +10,16 @@ const ProfilePage = () => {
       <h1 className="text-2xl font-bold">Profile</h1>
       <div className="rounded-2xl border border-borderMain bg-cardBg p-6 shadow-card">
         <p className="text-sm text-textSecondary">Username</p>
-        <p className="text-lg font-semibold text-textMain">{user?.username}</p>
+        <p className="text-lg font-semibold text-textMain">{user?.username || user?.email || '-'}</p>
+
+        <p className="mt-4 text-sm text-textSecondary">Email</p>
+        <p className="text-lg font-semibold text-textMain">{user?.email || '-'}</p>
+
+        <p className="mt-4 text-sm text-textSecondary">Officer Name</p>
+        <p className="text-lg font-semibold text-textMain">{user?.fullName || '-'}</p>
 
         <p className="mt-4 text-sm text-textSecondary">Department</p>
-        <p className="text-lg font-semibold text-textMain">{user?.departmentLabel}</p>
+        <p className="text-lg font-semibold text-textMain">{user?.departmentLabel || '-'}</p>
 
         <p className="mt-4 text-sm text-textSecondary">Jurisdiction Pincodes</p>
         <p className="text-sm text-textMain">{jurisdiction.join(', ')}</p>

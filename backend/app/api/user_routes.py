@@ -1,4 +1,5 @@
 import uuid
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -46,6 +47,199 @@ def _payload_to_dict(payload: Any) -> Dict[str, Any]:
     return payload.dict(exclude_none=True)
 
 
+def _normalize_department_status(raw_status: Any) -> str:
+    normalized = str(raw_status or "").strip().lower()
+    if normalized in {"approve", "approved"}:
+        return "Approved"
+    if normalized in {"reject", "rejected", "deny", "denied"}:
+        return "Rejected"
+    if normalized in {"query", "query raised", "query_raised"}:
+        return "Query Raised"
+    if normalized in {"in review", "in_review", "review"}:
+        return "In Review"
+    if normalized in {"pending", "submitted", ""}:
+        return "Pending"
+    return str(raw_status or "Pending").strip() or "Pending"
+
+
+def _derive_overall_status_from_departments(department_rows: List[Dict[str, Any]]) -> str:
+    statuses = [_normalize_department_status(row.get("status")) for row in department_rows]
+    if not statuses:
+        return "Pending"
+    if any(status == "Rejected" for status in statuses):
+        return "Rejected"
+    if any(status == "Query Raised" for status in statuses):
+        return "Query Raised"
+    if all(status == "Approved" for status in statuses):
+        return "Approved"
+    if any(status == "In Review" for status in statuses):
+        return "In Review"
+    return "Pending"
+
+
+def _department_candidates(name: str) -> List[str]:
+    base = str(name or "").strip()
+    if not base:
+        return []
+    candidates = [base]
+    if not base.lower().endswith("department"):
+        candidates.append(f"{base} Department")
+    return [item for item in dict.fromkeys(candidates) if item]
+
+
+def _insert_event_with_schema_fallback(
+    event_id: str,
+    user_id: str,
+    payload: ApplicationSubmitRequest,
+) -> None:
+    common = {
+        "id": event_id,
+        "organizer_id": user_id,
+        "name": payload.event_name,
+        "category": payload.event_type,
+        "expected_crowd": payload.crowd_size,
+        "start_time": payload.start_date,
+        "end_time": payload.end_date,
+        "raw_address": payload.address,
+        "city": payload.city,
+        "pincode": payload.pincode,
+        "latitude": payload.map_latitude,
+        "longitude": payload.map_longitude,
+        "is_moving_procession": payload.is_moving_procession,
+    }
+    payload_candidates = [
+        {
+            **common,
+            "venue_name": payload.venue_name,
+            "venue_type": payload.venue_type,
+            "venue_ownership": payload.venue_ownership,
+        },
+        {**common},
+        # Legacy fallback if organizer_id is absent in schema.
+        {k: v for k, v in common.items() if k != "organizer_id"},
+    ]
+
+    last_error: Optional[Exception] = None
+    for candidate in payload_candidates:
+        try:
+            db.table("events").insert(candidate).execute()
+            return
+        except Exception as exc:
+            last_error = exc
+            continue
+    raise HTTPException(
+        status_code=500,
+        detail=f"Events insertion failed: {_error_detail(last_error or Exception(), 'Unknown error')}",
+    )
+
+
+def _insert_application_with_schema_fallback(app_id: str, event_id: str, user_id: str) -> None:
+    now_iso = datetime.utcnow().isoformat()
+    payload_candidates = [
+        {
+            "app_id": app_id,
+            "event_id": event_id,
+            "status": "Pending",
+            "submitted_at": now_iso,
+            "user_id": user_id,
+        },
+        {
+            "app_id": app_id,
+            "event_id": event_id,
+            "status": "Submitted",
+            "submitted_at": now_iso,
+            "user_id": user_id,
+        },
+        {
+            "app_id": app_id,
+            "event_id": event_id,
+            "status": "Draft",
+            "submitted_at": now_iso,
+        },
+        {
+            "app_id": app_id,
+            "event_id": event_id,
+            "submitted_at": now_iso,
+        },
+    ]
+    last_error: Optional[Exception] = None
+    for candidate in payload_candidates:
+        try:
+            db.table("applications").insert(candidate).execute()
+            return
+        except Exception as exc:
+            last_error = exc
+            continue
+    raise HTTPException(
+        status_code=500,
+        detail=f"Applications insertion failed: {_error_detail(last_error or Exception(), 'Unknown error')}",
+    )
+
+
+def _insert_department_routings_with_fallback(app_id: str, departments: List[str]) -> None:
+    # Fast path for schemas that accept canonical department values.
+    try:
+        db.table("department_routings").insert(
+            [{"app_id": app_id, "department": department, "status": "Pending"} for department in departments]
+        ).execute()
+        return
+    except Exception:
+        pass
+
+    for department in departments:
+        inserted = False
+        for department_candidate in _department_candidates(department):
+            for candidate in (
+                {"app_id": app_id, "department": department_candidate, "status": "Pending"},
+                {"app_id": app_id, "department": department_candidate},
+            ):
+                try:
+                    db.table("department_routings").insert(candidate).execute()
+                    inserted = True
+                    break
+                except Exception:
+                    continue
+            if inserted:
+                break
+        if not inserted:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to route application to department {department}",
+            )
+
+
+def _fetch_user_application_rows(user_id: str) -> List[Dict[str, Any]]:
+    query_candidates = [
+        (
+            "app_id, status, submitted_at, events!inner(organizer_id, name, category, venue_type, expected_crowd, start_time, raw_address)",
+            ("events.organizer_id", user_id),
+        ),
+        (
+            "app_id, status, submitted_at, events!inner(organizer_id, name, category, expected_crowd, start_time, raw_address)",
+            ("events.organizer_id", user_id),
+        ),
+        (
+            "app_id, status, submitted_at, user_id, events(name, category, venue_type, expected_crowd, start_time, raw_address)",
+            ("user_id", user_id),
+        ),
+        (
+            "app_id, status, submitted_at, user_id, events(name, category, expected_crowd, start_time, raw_address)",
+            ("user_id", user_id),
+        ),
+    ]
+
+    for select_clause, (filter_key, filter_value) in query_candidates:
+        try:
+            query = db.table("applications").select(select_clause).order("submitted_at", desc=True)
+            query = query.eq(filter_key, filter_value)
+            response = query.execute()
+            if response.data:
+                return response.data
+        except Exception:
+            continue
+    return []
+
+
 def _application_with_event(app_id: str) -> Dict[str, Any]:
     application_response = (
         db.table("applications").select("*").eq("app_id", app_id).limit(1).execute()
@@ -75,9 +269,11 @@ def _application_with_event(app_id: str) -> Dict[str, Any]:
     }
 
 
-def _assert_application_owner(application: Dict[str, Any], user_id: str) -> None:
-    owner_id = application.get("user_id")
-    if owner_id and owner_id != user_id:
+def _assert_application_owner(payload: Dict[str, Any], user_id: str) -> None:
+    application = payload.get("application") or {}
+    event = payload.get("event") or {}
+    owner_id = application.get("user_id") or event.get("organizer_id")
+    if owner_id and str(owner_id) != str(user_id):
         raise HTTPException(status_code=403, detail="You are not allowed to access this application")
 
 
@@ -189,33 +385,17 @@ async def submit_application(payload: ApplicationSubmitRequest, current=Depends(
         custom_app_id = f"UEPP-{new_event_id[:8].upper()}"
         user_id = current["user"]["id"]
 
-        event_data = {
-            "id": new_event_id,
-            "name": payload.event_name,
-            "category": payload.event_type,
-            "expected_crowd": payload.crowd_size,
-            "start_time": payload.start_date,
-            "end_time": payload.end_date,
-            "raw_address": payload.address,
-            "city": payload.city,
-            "pincode": payload.pincode,
-            "latitude": payload.map_latitude,
-            "longitude": payload.map_longitude,
-            "is_moving_procession": payload.is_moving_procession,
-        }
-        db.table("events").insert(event_data).execute()
+        _insert_event_with_schema_fallback(
+            event_id=new_event_id,
+            user_id=user_id,
+            payload=payload,
+        )
 
-        app_data = {
-            "app_id": custom_app_id,
-            "event_id": new_event_id,
-            "status": "Submitted",
-            "user_id": user_id,
-        }
-        try:
-            db.table("applications").insert(app_data).execute()
-        except Exception:
-            app_data.pop("user_id", None)
-            db.table("applications").insert(app_data).execute()
+        _insert_application_with_schema_fallback(
+            app_id=custom_app_id,
+            event_id=new_event_id,
+            user_id=user_id,
+        )
 
         departments_needed: List[str] = []
         if payload.crowd_size > 200 or payload.is_moving_procession or payload.has_loudspeakers:
@@ -238,11 +418,7 @@ async def submit_application(payload: ApplicationSubmitRequest, current=Depends(
             seen.add(department)
             ordered_departments.append(department)
 
-        routing_inserts = [
-            {"app_id": custom_app_id, "department": department, "status": "Pending"}
-            for department in ordered_departments
-        ]
-        db.table("department_routings").insert(routing_inserts).execute()
+        _insert_department_routings_with_fallback(custom_app_id, ordered_departments)
 
         return {
             "status": "success",
@@ -262,43 +438,54 @@ async def get_user_applications(current=Depends(get_current_user)):
     user_id = current["user"]["id"]
 
     try:
-        try:
-            response = (
-                db.table("applications")
-                .select("app_id, status, submitted_at, user_id, events(name, category, expected_crowd, start_time, raw_address)")
-                .eq("user_id", user_id)
-                .order("submitted_at", desc=True)
-                .execute()
-            )
-            rows = response.data or []
-        except Exception:
-            rows = []
+        rows = _fetch_user_application_rows(user_id)
 
-        if not rows:
-            # Backward compatibility for deployments where applications.user_id is absent.
-            response = (
-                db.table("applications")
-                .select("app_id, status, submitted_at, events(name, category, expected_crowd, start_time, raw_address)")
-                .order("submitted_at", desc=True)
-                .execute()
-            )
-            rows = response.data or []
+        app_ids = [app.get("app_id") for app in rows if app.get("app_id")]
+        routing_map: Dict[str, List[Dict[str, Any]]] = {}
+        if app_ids:
+            try:
+                routing_rows = (
+                    db.table("department_routings")
+                    .select("app_id, department, status, rejection_reason, updated_at")
+                    .in_("app_id", app_ids)
+                    .order("updated_at", desc=True)
+                    .execute()
+                    .data
+                    or []
+                )
+                for row in routing_rows:
+                    routing_map.setdefault(row.get("app_id"), []).append(row)
+            except Exception:
+                routing_map = {}
 
         formatted_apps = []
         for app in rows:
             event = app.get("events") or {}
             if isinstance(event, list):
                 event = event[0] if event else {}
+            department_rows = routing_map.get(app.get("app_id"), [])
+            overall_status = _derive_overall_status_from_departments(department_rows)
+            department_payload = [
+                {
+                    "name": row.get("department"),
+                    "status": _normalize_department_status(row.get("status")),
+                    "reason": row.get("rejection_reason"),
+                    "updatedAt": row.get("updated_at"),
+                }
+                for row in department_rows
+                if row.get("department")
+            ]
             formatted_apps.append(
                 {
                     "id": app.get("app_id"),
                     "eventName": event.get("name", "Unknown Event"),
                     "eventType": event.get("category", "Unknown"),
                     "crowdSize": event.get("expected_crowd", 0),
-                    "venueType": "Public",
-                    "status": app.get("status", "Pending"),
+                    "venueType": event.get("venue_type") or "Public",
+                    "status": overall_status or app.get("status", "Pending"),
                     "submittedAt": app.get("submitted_at"),
                     "address": event.get("raw_address", "Unknown"),
+                    "departments": department_payload,
                 }
             )
 
@@ -314,7 +501,20 @@ async def get_user_applications(current=Depends(get_current_user)):
 async def get_application_detail(app_id: str, current=Depends(get_current_user)):
     try:
         payload = _application_with_event(app_id)
-        _assert_application_owner(payload["application"], current["user"]["id"])
+        _assert_application_owner(payload, current["user"]["id"])
+        department_rows = payload.get("department_routings") or []
+        overall_status = _derive_overall_status_from_departments(department_rows)
+        payload["application"]["status"] = overall_status
+        payload["departments"] = [
+            {
+                "name": row.get("department"),
+                "status": _normalize_department_status(row.get("status")),
+                "reason": row.get("rejection_reason"),
+                "updatedAt": row.get("updated_at"),
+            }
+            for row in department_rows
+            if row.get("department")
+        ]
         return {
             "status": "success",
             "data": payload,
@@ -333,11 +533,8 @@ async def get_notifications(current=Depends(get_current_user)):
     user_id = current["user"]["id"]
 
     try:
-        try:
-            apps_response = db.table("applications").select("app_id").eq("user_id", user_id).execute()
-            app_ids: List[str] = [row["app_id"] for row in apps_response.data or [] if row.get("app_id")]
-        except Exception:
-            app_ids = []
+        app_rows = _fetch_user_application_rows(user_id)
+        app_ids: List[str] = [row["app_id"] for row in app_rows if row.get("app_id")]
 
         if app_ids:
             routings_response = (
@@ -353,13 +550,14 @@ async def get_notifications(current=Depends(get_current_user)):
 
         notifications = []
         for routing in routing_rows:
+            normalized_status = _normalize_department_status(routing.get("status"))
             notifications.append(
                 {
                     "app_id": routing.get("app_id"),
                     "department": routing.get("department"),
-                    "status": routing.get("status"),
+                    "status": normalized_status,
                     "message": routing.get("rejection_reason")
-                    or f"{routing.get('department', 'Department')} updated status to {routing.get('status', 'Pending')}",
+                    or f"{routing.get('department', 'Department')} updated status to {normalized_status}",
                     "updated_at": routing.get("updated_at"),
                 }
             )

@@ -13,6 +13,7 @@ class AuthRegisterRequest(UserCredentials):
     phone_number: Optional[str] = None
     organization: Optional[str] = None
     department: Optional[str] = None
+    username: Optional[str] = None
 
 
 class UserProfileUpdateRequest(BaseModel):

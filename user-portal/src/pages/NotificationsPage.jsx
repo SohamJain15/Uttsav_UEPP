@@ -20,6 +20,8 @@ const NotificationsPage = () => {
     };
 
     loadNotifications();
+    const intervalId = setInterval(loadNotifications, 15000);
+    return () => clearInterval(intervalId);
   }, []);
 
   return (

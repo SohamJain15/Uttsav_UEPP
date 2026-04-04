@@ -72,6 +72,7 @@ const Header = ({ title, onOpenSidebar }) => {
                     type="button"
                     onClick={() => {
                       setIsProfileOpen(false);
+                      localStorage.removeItem("uttsav_auth");
                       navigate("/login");
                     }}
                     className="flex-1 rounded-lg bg-slate-100 px-3 py-2 text-sm font-medium text-textPrimary hover:bg-slate-200"

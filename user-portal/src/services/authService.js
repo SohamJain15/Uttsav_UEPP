@@ -1,37 +1,48 @@
 import api from "./api";
-import { dummyProfile } from "../data/dummyProfile";
+
+const normalizeAuthPayload = (data = {}) => {
+  const accessToken =
+    data.access_token || data.token || data?.session?.access_token || "";
+
+  const user = data.user || {};
+  const profile = data.profile || {};
+
+  return {
+    access_token: accessToken,
+    token_type: data.token_type || "bearer",
+    user: {
+      id: user.id || profile.id || "",
+      email: user.email || profile.email || "",
+      full_name: profile.full_name || user.full_name || "",
+      organization: profile.organization || "",
+      department: profile.department || "",
+      phone_number: profile.phone_number || user.phone || "",
+    },
+    profile: profile || null,
+  };
+};
 
 export const authService = {
   async login(payload) {
-    try {
-      const response = await api.post("/auth/login", payload);
-      return response.data;
-    } catch (error) {
-      return {
-        token: "mock-jwt-token",
-        user: dummyProfile,
-      };
-    }
+    const response = await api.post("/api/auth/login", payload);
+    return normalizeAuthPayload(response.data);
   },
 
   async register(payload) {
-    try {
-      const response = await api.post("/auth/register", payload);
-      return response.data;
-    } catch (error) {
-      return {
-        message: "Registration successful",
-        user: { ...dummyProfile, ...payload },
-      };
-    }
+    const registerPayload = {
+      email: payload.email,
+      password: payload.password,
+      full_name: payload.name,
+      phone_number: payload.phone,
+      organization: payload.organization,
+      department: payload.department || "Organizer",
+    };
+    const response = await api.post("/api/auth/register", registerPayload);
+    return response.data;
   },
 
   async getProfile() {
-    try {
-      const response = await api.get("/auth/profile");
-      return response.data;
-    } catch (error) {
-      return dummyProfile;
-    }
+    const response = await api.get("/api/user/profile");
+    return response.data?.profile || response.data?.user || null;
   },
 };

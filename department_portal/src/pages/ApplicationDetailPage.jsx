@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import ActionPanel from '../components/ActionPanel';
 import DocumentRow from '../components/DocumentRow';
@@ -8,11 +8,11 @@ import RiskBadge from '../components/RiskBadge';
 import SLAChip from '../components/SLAChip';
 import Toast from '../components/Toast';
 import { useAuth } from '../context/AuthContext';
-import { applyDepartmentAction, ensureApplicationInReview } from '../data/storage';
 import { useDepartmentData } from '../hooks/useDepartmentData';
+import { departmentService } from '../services/departmentService';
 import {
   buildDecisionChecklist,
-  getDepartmentStatus
+  getDepartmentStatus,
 } from '../utils/application';
 
 const focusLabelMap = {
@@ -41,27 +41,59 @@ const focusLabelMap = {
 };
 
 const getProgressText = (application) => {
-  const completeCount = application.requiredDepartments.filter(
+  const requiredDepartments = Array.isArray(application.requiredDepartments)
+    ? application.requiredDepartments
+    : [];
+  const completeCount = requiredDepartments.filter(
     (department) => application.statusByDepartment[department] === 'Approved'
   ).length;
 
-  return `${completeCount}/${application.requiredDepartments.length} completed`;
+  return `${completeCount}/${requiredDepartments.length} completed`;
 };
 
 const ApplicationDetailPage = () => {
   const { id } = useParams();
   const { user } = useAuth();
-  const { applications, refresh } = useDepartmentData(user?.role);
+  const { applications, refresh, isLoading, error } = useDepartmentData(user?.role);
 
   const [toast, setToast] = useState(null);
-  const application = useMemo(() => applications.find((item) => item.id === id), [applications, id]);
+  const [detailApplication, setDetailApplication] = useState(null);
+  const application = useMemo(() => {
+    const detail = detailApplication?.id === id ? detailApplication : null;
+    return detail || applications.find((item) => item.id === id) || null;
+  }, [applications, detailApplication, id]);
+
+  const loadDetail = useCallback(async () => {
+    if (!id) return;
+    try {
+      const detail = await departmentService.getApplicationDetail(id);
+      if (detail?.id) {
+        setDetailApplication(detail);
+      }
+    } catch (detailError) {
+      // Keep list-level data as fallback if detail API fails.
+    }
+  }, [id]);
 
   useEffect(() => {
     if (id && user?.role && user.role !== 'Admin') {
-      ensureApplicationInReview(id, user.role);
-      refresh();
+      const markAsInReview = async () => {
+        try {
+          await departmentService.markInReview(id);
+        } catch (markError) {
+          // Do not block detail screen if status update fails.
+        } finally {
+          await refresh();
+          await loadDetail();
+        }
+      };
+
+      markAsInReview();
+      return;
     }
-  }, [id, refresh, user?.role]);
+
+    loadDetail();
+  }, [id, loadDetail, refresh, user?.role]);
 
   useEffect(() => {
     if (!toast) {
@@ -72,41 +104,58 @@ const ApplicationDetailPage = () => {
     return () => clearTimeout(timer);
   }, [toast]);
 
+  useEffect(() => {
+    if (application?.id === id) return;
+    loadDetail();
+  }, [application?.id, id, loadDetail]);
+
+  if (isLoading && !application) {
+    return <EmptyState message="Loading application..." />;
+  }
+
+  if (error && !application) {
+    return <EmptyState message={error} />;
+  }
+
   if (!application) {
     return <EmptyState message="Application not available." />;
   }
 
-  const currentStatus = getDepartmentStatus(application, user.role);
+  const currentStatus = getDepartmentStatus(application, user?.role);
   const checklistItems = buildDecisionChecklist(application);
-  const riskScoreWidth = Math.min(100, application.aiRiskBreakdown.riskScore);
+  const riskScoreWidth = Math.min(100, Number(application.aiRiskBreakdown?.riskScore || 0));
   const progressText = getProgressText(application);
+  const requiredDepartments = Array.isArray(application.requiredDepartments)
+    ? application.requiredDepartments
+    : [];
+  const aiRiskBreakdown = application.aiRiskBreakdown || {};
+  const currentRole = user?.role || '';
 
-  const handleAction = (action, comment) => {
-    const result = applyDepartmentAction({
-      applicationId: application.id,
-      role: user.role,
-      action,
-      comment
-    });
+  const handleAction = async (action, comment) => {
+    try {
+      await departmentService.submitAction({
+        appId: application.id,
+        action,
+        rejectionReason: comment,
+      });
 
-    if (result.error) {
-      setToast({ message: result.error, tone: 'error' });
-      return;
+      if (action === 'approve') {
+        setToast({ message: 'Department NOC issued. Master Permit generated.', tone: 'success' });
+      }
+
+      if (action === 'reject') {
+        setToast({ message: 'Application rejected and reason recorded.', tone: 'error' });
+      }
+
+      if (action === 'query') {
+        setToast({ message: 'Query sent to organizer for clarification.', tone: 'success' });
+      }
+
+      await refresh();
+      await loadDetail();
+    } catch (actionError) {
+      setToast({ message: actionError?.message || 'Failed to update application status.', tone: 'error' });
     }
-
-    if (action === 'approve') {
-      setToast({ message: 'Department NOC issued. Master Permit generated.', tone: 'success' });
-    }
-
-    if (action === 'reject') {
-      setToast({ message: 'Application rejected and reason recorded.', tone: 'error' });
-    }
-
-    if (action === 'query') {
-      setToast({ message: 'Query sent to organizer for clarification.', tone: 'success' });
-    }
-
-    refresh();
   };
 
   const renderFocusBlock = (departmentName) => {
@@ -171,7 +220,7 @@ const ApplicationDetailPage = () => {
             </p>
             <p>
               <span className="font-semibold text-textSecondary">Assigned Departments:</span>{' '}
-              {application.requiredDepartments.join(', ')}
+              {requiredDepartments.join(', ') || '-'}
             </p>
             <div className="pt-2">
               <RiskBadge riskLevel={currentStatus} isStatus />
@@ -179,11 +228,11 @@ const ApplicationDetailPage = () => {
           </div>
 
           <div className="mt-5 space-y-3">
-            {user.role === 'Admin'
-              ? application.requiredDepartments.map((departmentName) =>
-                  renderFocusBlock(departmentName)
-                )
-              : renderFocusBlock(user.role)}
+            {currentRole === 'Admin'
+              ? requiredDepartments.map((departmentName) => renderFocusBlock(departmentName))
+              : currentRole
+                ? renderFocusBlock(currentRole)
+                : null}
           </div>
         </section>
 
@@ -196,13 +245,13 @@ const ApplicationDetailPage = () => {
                 <div className="mb-1 flex items-center justify-between text-sm">
                   <span className="text-textSecondary">Capacity Utilization</span>
                   <span className="font-semibold text-textMain">
-                    {application.aiRiskBreakdown.capacityUtilization}%
+                    {aiRiskBreakdown.capacityUtilization}%
                   </span>
                 </div>
                 <div className="h-2 rounded-full bg-slate-200">
                   <div
                     className="h-2 rounded-full bg-primary"
-                    style={{ width: `${application.aiRiskBreakdown.capacityUtilization}%` }}
+                    style={{ width: `${aiRiskBreakdown.capacityUtilization}%` }}
                   />
                 </div>
               </div>
@@ -210,7 +259,7 @@ const ApplicationDetailPage = () => {
               <div>
                 <p className="text-sm text-textSecondary">Exit Safety Rating</p>
                 <p className="mt-1 text-sm font-semibold text-textMain">
-                  {application.aiRiskBreakdown.exitSafetyRating}
+                  {aiRiskBreakdown.exitSafetyRating}
                 </p>
               </div>
 
@@ -218,7 +267,7 @@ const ApplicationDetailPage = () => {
                 <div className="mb-1 flex items-center justify-between text-sm">
                   <span className="text-textSecondary">Risk Score</span>
                   <span className="font-semibold text-textMain">
-                    {application.aiRiskBreakdown.riskScore}/100
+                    {aiRiskBreakdown.riskScore}/100
                   </span>
                 </div>
                 <div className="h-2 rounded-full bg-slate-200">
@@ -230,7 +279,7 @@ const ApplicationDetailPage = () => {
               </div>
 
               <p className="rounded-xl bg-slate-100 px-3 py-2 text-sm text-textMain">
-                {application.aiRiskBreakdown.recommendation}
+                {aiRiskBreakdown.recommendation}
               </p>
             </div>
           </div>
@@ -249,18 +298,18 @@ const ApplicationDetailPage = () => {
           <div className="rounded-2xl border border-primary/25 bg-primary/5 p-4 shadow-card">
             <h3 className="text-base font-semibold text-textMain">System Insight</h3>
             <p className="mt-2 text-sm text-textSecondary">
-              This event requires approval from {application.requiredDepartments.join(', ')}.
+              This event requires approval from {requiredDepartments.join(', ') || '-'}.
             </p>
             <p className="mt-2 text-sm text-textSecondary">Current progress: {progressText}.</p>
             <p className="mt-2 text-sm font-semibold text-textMain">
-              {application.aiRiskBreakdown.recommendation}
+              {aiRiskBreakdown.recommendation}
             </p>
           </div>
 
-          <ProgressTracker application={application} role={user.role} />
+          <ProgressTracker application={application} role={currentRole} />
 
           <ActionPanel
-            role={user.role}
+            role={currentRole}
             currentStatus={currentStatus}
             riskLevel={application.riskLevel}
             checklistItems={checklistItems}
@@ -270,8 +319,8 @@ const ApplicationDetailPage = () => {
           <div className="rounded-2xl border border-borderMain bg-cardBg p-4 shadow-card">
             <h3 className="text-base font-semibold text-textMain">Feedback</h3>
             <p className="mt-2 text-sm text-textSecondary">
-              {application.queryByDepartment?.[user.role]?.message ??
-                application.rejectionReasonByDepartment?.[user.role] ??
+              {application.queryByDepartment?.[currentRole]?.message ??
+                application.rejectionReasonByDepartment?.[currentRole] ??
                 'No feedback issued yet.'}
             </p>
           </div>

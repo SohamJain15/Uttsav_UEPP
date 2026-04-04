@@ -24,15 +24,33 @@ def _safe_extension(filename: Optional[str]) -> str:
 
 def _assert_application_owner(app_id: str, user_id: str) -> None:
     try:
-        response = db.table("applications").select("app_id, user_id").eq("app_id", app_id).limit(1).execute()
+        try:
+            response = (
+                db.table("applications")
+                .select("app_id, user_id, event_id, events(organizer_id)")
+                .eq("app_id", app_id)
+                .limit(1)
+                .execute()
+            )
+        except Exception:
+            response = (
+                db.table("applications")
+                .select("app_id, event_id, events(organizer_id)")
+                .eq("app_id", app_id)
+                .limit(1)
+                .execute()
+            )
     except Exception:
         return
 
     application = first_row(response.data)
     if not application:
         raise HTTPException(status_code=404, detail="Application not found")
-    owner_id = application.get("user_id")
-    if owner_id and owner_id != user_id:
+    event = application.get("events") or {}
+    if isinstance(event, list):
+        event = event[0] if event else {}
+    owner_id = application.get("user_id") or event.get("organizer_id")
+    if owner_id and str(owner_id) != str(user_id):
         raise HTTPException(status_code=403, detail="You are not allowed to access this application's documents")
 
 
@@ -67,15 +85,46 @@ async def upload_document(
         )
         public_url = db.storage.from_(DOCUMENT_BUCKET).get_public_url(storage_path)
 
-        document_payload = {
-            "app_id": app_id,
-            "document_url": public_url,
-            "file_name": file.filename,
-            "storage_path": storage_path,
-            "uploaded_by": user_id,
-            "content_type": content_type,
-        }
-        db.table("documents").insert(document_payload).execute()
+        payload_candidates = [
+            # Current DB schema from user message.
+            {
+                "app_id": app_id,
+                "doc_type": "General",
+                "file_name": file.filename,
+                "storage_url": public_url,
+            },
+            # Backward-compatible schema.
+            {
+                "app_id": app_id,
+                "document_url": public_url,
+                "file_name": file.filename,
+                "storage_path": storage_path,
+                "uploaded_by": user_id,
+                "content_type": content_type,
+            },
+            # Minimal fallback.
+            {
+                "app_id": app_id,
+                "file_name": file.filename,
+                "storage_url": public_url,
+            },
+        ]
+
+        inserted = False
+        last_error: Optional[Exception] = None
+        for document_payload in payload_candidates:
+            try:
+                db.table("documents").insert(document_payload).execute()
+                inserted = True
+                break
+            except Exception as exc:
+                last_error = exc
+                continue
+        if not inserted:
+            raise HTTPException(
+                status_code=500,
+                detail=_error_detail(last_error or Exception("Unknown documents insert error"), "Document metadata insert failed"),
+            )
 
         return {
             "status": "success",
@@ -96,13 +145,22 @@ async def get_documents(app_id: str, current=Depends(get_current_user)):
     _assert_application_owner(app_id, current["user"]["id"])
 
     try:
-        response = (
-            db.table("documents")
-            .select("*")
-            .eq("app_id", app_id)
-            .order("created_at", desc=True)
-            .execute()
-        )
+        try:
+            response = (
+                db.table("documents")
+                .select("*")
+                .eq("app_id", app_id)
+                .order("created_at", desc=True)
+                .execute()
+            )
+        except Exception:
+            response = (
+                db.table("documents")
+                .select("*")
+                .eq("app_id", app_id)
+                .order("uploaded_at", desc=True)
+                .execute()
+            )
         return {
             "status": "success",
             "app_id": app_id,

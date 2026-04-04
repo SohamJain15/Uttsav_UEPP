@@ -1,32 +1,41 @@
 import { createContext, useContext, useMemo, useState } from 'react';
-import { authenticateCredentials } from '../utils/auth';
+import { authService } from '../services/authService';
 
 const AUTH_KEY = 'uttsav_department_auth';
 
 const AuthContext = createContext(null);
 
-const getStoredUser = () => {
+const getStoredAuth = () => {
   const raw = localStorage.getItem(AUTH_KEY);
-  return raw ? JSON.parse(raw) : null;
+  if (!raw) return null;
+
+  try {
+    return JSON.parse(raw);
+  } catch (error) {
+    return null;
+  }
 };
 
 export const AuthProvider = ({ children }) => {
-  const [user, setUser] = useState(getStoredUser);
+  const [authState, setAuthState] = useState(getStoredAuth);
+  const user = authState?.user || null;
 
-  const login = (username, password) => {
-    const result = authenticateCredentials(username, password);
-
-    if (!result.isValid) {
-      return result;
+  const login = async (username, password) => {
+    try {
+      const result = await authService.login({ username, password });
+      setAuthState(result);
+      localStorage.setItem(AUTH_KEY, JSON.stringify(result));
+      return { isValid: true, user: result.user };
+    } catch (error) {
+      return {
+        isValid: false,
+        message: error?.message || 'Login failed. Please verify your credentials.',
+      };
     }
-
-    setUser(result.user);
-    localStorage.setItem(AUTH_KEY, JSON.stringify(result.user));
-    return result;
   };
 
   const logout = () => {
-    setUser(null);
+    setAuthState(null);
     localStorage.removeItem(AUTH_KEY);
   };
 
@@ -35,7 +44,7 @@ export const AuthProvider = ({ children }) => {
       user,
       isAuthenticated: Boolean(user),
       login,
-      logout
+      logout,
     }),
     [user]
   );
