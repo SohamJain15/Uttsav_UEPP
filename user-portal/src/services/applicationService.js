@@ -3,6 +3,10 @@ import axios from "axios";
 import { determineDepartments } from "../utils/determineDepartments";
 import { calculateRiskFromEvent } from "../utils/riskUtils";
 
+const backendOrigin = (import.meta.env.VITE_BACKEND_ORIGIN || "http://localhost:8000")
+  .trim()
+  .replace(/\/$/, "");
+
 const normalizeStatus = (rawStatus) => {
   const status = String(rawStatus || "").trim().toLowerCase();
   if (status === "approved" || status === "approve") return "Approved";
@@ -18,6 +22,29 @@ const normalizeRiskLevel = (rawRisk) => {
   if (risk.includes("low")) return "Low";
   return "Medium";
 };
+
+const normalizeDocumentUrl = (rawUrl) => {
+  if (typeof rawUrl === "string") {
+    const trimmed = rawUrl.trim();
+    if (!trimmed) return "";
+    if (trimmed.startsWith("/")) {
+      return `${backendOrigin}${trimmed}`;
+    }
+    return trimmed;
+  }
+
+  if (rawUrl && typeof rawUrl === "object") {
+    const nestedData = rawUrl.data && typeof rawUrl.data === "object" ? rawUrl.data : {};
+    return normalizeDocumentUrl(
+      rawUrl.publicURL || rawUrl.publicUrl || rawUrl.url || nestedData.publicUrl || nestedData.publicURL || ""
+    );
+  }
+
+  return "";
+};
+
+const normalizeConditions = (conditions) =>
+  Array.isArray(conditions) ? conditions.filter((item) => Boolean(item)) : [];
 
 const normalizeDepartments = (departments = []) =>
   (Array.isArray(departments) ? departments : [])
@@ -302,7 +329,7 @@ const normalizeApplicationDetail = (payload = {}) => {
     ? root.documents.map((doc) => ({
         id: doc.id || `${doc.file_name || "doc"}-${doc.uploaded_at || ""}`,
         fileName: doc.file_name || "document",
-        url: doc.storage_url || "",
+        url: normalizeDocumentUrl(doc.storage_url || doc.url || ""),
         docType: doc.doc_type || "General",
         uploadedAt: doc.uploaded_at || "",
       }))
@@ -310,10 +337,15 @@ const normalizeApplicationDetail = (payload = {}) => {
 
   const departmentNOCs = Array.isArray(root?.department_nocs)
     ? root.department_nocs.map((noc) => ({
+        applicationId: noc.applicationId || application.app_id || "",
         department: noc.department || "Department",
-        url: noc.url || "",
+        approvedBy: noc.approvedBy || "",
+        url: normalizeDocumentUrl(noc.url || ""),
         fileName: noc.fileName || "Department-NOC.pdf",
         timestamp: noc.timestamp || "",
+        conditions: normalizeConditions(noc.conditions),
+        remarks: noc.remarks || "",
+        qrCode: noc.qrCode || "",
       }))
     : [];
 
@@ -321,9 +353,15 @@ const normalizeApplicationDetail = (payload = {}) => {
     ? {
         permitId: root.final_noc.permitId || `UTTSAV-NOC-${application.app_id || ""}`,
         applicationId: root.final_noc.applicationId || application.app_id || "",
-        url: root.final_noc.url || "",
+        eventName: root.final_noc.eventName || event.name || "",
+        url: normalizeDocumentUrl(root.final_noc.url || ""),
         fileName: root.final_noc.fileName || `NOC-FINAL-${application.app_id || "application"}.pdf`,
         issueDate: root.final_noc.issueDate || "",
+        approvedDepartments: Array.isArray(root.final_noc.approvedDepartments)
+          ? root.final_noc.approvedDepartments
+          : departments.map((department) => department.name),
+        validity: root.final_noc.validity || "",
+        combinedConditions: normalizeConditions(root.final_noc.combinedConditions),
         qrCode: root.final_noc.qrCode || "",
       }
     : null;

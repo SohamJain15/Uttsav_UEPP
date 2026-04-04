@@ -18,6 +18,26 @@ def _new_auth_client():
     return create_client(SUPABASE_URL, auth_key)
 
 
+def _sign_in_with_password_candidates(email: str, password: str):
+    payload = {"email": email, "password": password}
+    last_error: Optional[Exception] = None
+
+    # Primary path: isolated auth client (preferred)
+    try:
+        primary_client = _new_auth_client()
+        return primary_client.auth.sign_in_with_password(payload)
+    except Exception as exc:
+        last_error = exc
+
+    # Fallback path: shared service-role client auth context
+    try:
+        return db.auth.sign_in_with_password(payload)
+    except Exception as exc:
+        last_error = exc
+
+    raise last_error or Exception("Login failed")
+
+
 def _error_detail(exc: Exception, fallback: str) -> str:
     return str(getattr(exc, "message", None) or exc or fallback)
 
@@ -373,9 +393,9 @@ async def login_user(credentials: UserCredentials):
         else:
             login_email = _resolve_login_email(login_identifier)
 
-        auth_client = _new_auth_client()
-        response = auth_client.auth.sign_in_with_password(
-            {"email": login_email, "password": credentials.password}
+        response = _sign_in_with_password_candidates(
+            login_email,
+            credentials.password,
         )
         session = getattr(response, "session", None)
         token = getattr(session, "access_token", None)

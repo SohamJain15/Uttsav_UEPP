@@ -24,7 +24,12 @@ const normalizeAuthPayload = (data = {}) => {
 
 export const authService = {
   async login(payload) {
-    const response = await api.post("/api/auth/login", payload);
+    let response;
+    try {
+      response = await api.post("/api/auth/login", payload);
+    } catch (primaryError) {
+      response = await api.post("/api/user/login", payload);
+    }
     const normalizedData = normalizeAuthPayload(response.data);
 
     // FIX: Actively store the token so the api.js interceptor can attach it to future requests

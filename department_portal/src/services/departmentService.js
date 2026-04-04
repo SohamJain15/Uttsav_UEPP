@@ -1,5 +1,9 @@
 import api from './api';
 
+const backendOrigin = (import.meta.env.VITE_BACKEND_ORIGIN || 'http://localhost:8001')
+  .trim()
+  .replace(/\/$/, '');
+
 const normalizeStatus = (rawStatus) => {
   const normalized = String(rawStatus || '').trim().toLowerCase();
   if (normalized === 'approved' || normalized === 'approve') return 'Approved';
@@ -15,6 +19,28 @@ const normalizeRisk = (rawRisk) => {
   if (normalized.includes('low')) return 'Low';
   return 'Medium';
 };
+
+const normalizeDocumentUrl = (rawUrl) => {
+  if (typeof rawUrl === 'string') {
+    const trimmed = rawUrl.trim();
+    if (!trimmed) return '';
+    if (trimmed.startsWith('/')) {
+      return `${backendOrigin}${trimmed}`;
+    }
+    return trimmed;
+  }
+
+  if (rawUrl && typeof rawUrl === 'object') {
+    const nestedData = rawUrl.data && typeof rawUrl.data === 'object' ? rawUrl.data : {};
+    return normalizeDocumentUrl(
+      rawUrl.publicURL || rawUrl.publicUrl || rawUrl.url || nestedData.publicUrl || nestedData.publicURL || ''
+    );
+  }
+
+  return '';
+};
+
+const normalizeConditions = (conditions) => (Array.isArray(conditions) ? conditions.filter(Boolean) : []);
 
 const normalizeDepartmentApplication = (item = {}) => {
   const requiredDepartments = Array.isArray(item.requiredDepartments)
@@ -41,7 +67,7 @@ const normalizeDepartmentApplication = (item = {}) => {
         id: doc.id || `${doc.fileName || doc.file_name || 'doc'}-${doc.uploadedAt || ''}`,
         docType: doc.docType || doc.doc_type || 'General',
         fileName: doc.fileName || doc.file_name || 'document',
-        url: doc.url || doc.storage_url || doc.document_url || '',
+        url: normalizeDocumentUrl(doc.url || doc.storage_url || doc.document_url || ''),
         uploadedAt: doc.uploadedAt || doc.uploaded_at || '',
       };
     })
@@ -50,7 +76,17 @@ const normalizeDepartmentApplication = (item = {}) => {
   const documents = allDocuments.filter((doc) => !String(doc.docType || '').startsWith('NOC'));
 
   const departmentNOCs = Array.isArray(item.departmentNOCs)
-    ? item.departmentNOCs
+    ? item.departmentNOCs.map((noc) => ({
+        applicationId: noc.applicationId || item.id || '',
+        department: noc.department || 'Department',
+        approvedBy: noc.approvedBy || '',
+        timestamp: noc.timestamp || '',
+        conditions: normalizeConditions(noc.conditions),
+        remarks: noc.remarks || '',
+        fileName: noc.fileName || `${noc.department || 'Department'}-NOC.pdf`,
+        url: normalizeDocumentUrl(noc.url || ''),
+        qrCode: noc.qrCode || '',
+      }))
     : allDocuments
       .filter((doc) => String(doc.docType || '').startsWith('NOC_') && doc.docType !== 'NOC_FINAL')
       .map((doc) => ({
@@ -61,11 +97,25 @@ const normalizeDepartmentApplication = (item = {}) => {
         conditions: [],
         remarks: '',
         fileName: doc.fileName,
-        url: doc.url,
+        url: normalizeDocumentUrl(doc.url),
+        qrCode: '',
       }));
 
   const finalNOC = item.finalNOC
-    ? item.finalNOC
+    ? {
+        permitId: item.finalNOC.permitId || `UTTSAV-NOC-${item.id || ''}`,
+        applicationId: item.finalNOC.applicationId || item.id || '',
+        eventName: item.finalNOC.eventName || item.eventName || '',
+        approvedDepartments: Array.isArray(item.finalNOC.approvedDepartments)
+          ? item.finalNOC.approvedDepartments
+          : requiredDepartments,
+        issueDate: item.finalNOC.issueDate || '',
+        validity: item.finalNOC.validity || 'As per departmental rules and event timeline',
+        combinedConditions: normalizeConditions(item.finalNOC.combinedConditions),
+        qrCode: item.finalNOC.qrCode || '',
+        url: normalizeDocumentUrl(item.finalNOC.url || ''),
+        fileName: item.finalNOC.fileName || `NOC-FINAL-${item.id || 'application'}.pdf`,
+      }
     : (() => {
         const finalDoc = allDocuments.find((doc) => doc.docType === 'NOC_FINAL');
         if (!finalDoc) return null;
@@ -78,7 +128,7 @@ const normalizeDepartmentApplication = (item = {}) => {
           validity: 'As per departmental rules and event timeline',
           combinedConditions: [],
           qrCode: '',
-          url: finalDoc.url,
+          url: normalizeDocumentUrl(finalDoc.url),
           fileName: finalDoc.fileName,
         };
       })();
@@ -144,17 +194,22 @@ export const departmentService = {
 
   async submitAction({ appId, action, rejectionReason }) {
     const normalizedAction = String(action || '').trim().toLowerCase();
+    const trimmedReason = String(rejectionReason || '').trim();
+
+    if (normalizedAction === 'reject' && !trimmedReason) {
+      throw new Error('Rejection reason is mandatory for rejected applications.');
+    }
 
     if (normalizedAction === 'query') {
       return api.post('/api/dept/raise-query', {
         app_id: appId,
-        query_text: rejectionReason || 'Please provide additional clarification.',
+        query_text: trimmedReason || 'Please provide additional clarification.',
       });
     }
 
     const actionResponse = await api.post(`/api/dept/applications/${appId}/action`, {
       action: normalizedAction,
-      rejection_reason: rejectionReason || null,
+      rejection_reason: trimmedReason || null,
     });
     return actionResponse;
   },

@@ -4,6 +4,7 @@ import uuid
 from io import BytesIO
 from datetime import UTC, datetime, timedelta
 from typing import Any, Dict, List, Optional
+from urllib.parse import quote
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Response
@@ -22,6 +23,26 @@ router = APIRouter()
 
 DOCUMENT_BUCKET = "application_documents"
 BACKEND_PUBLIC_BASE_URL = os.getenv("BACKEND_PUBLIC_BASE_URL", "http://127.0.0.1:8001").rstrip("/")
+FINAL_NOC_VALIDITY_TEXT = "Valid only for the approved event window and listed departmental conditions."
+DEFAULT_DEPARTMENT_REMARK = "Department clearance issued after compliance verification."
+DEPARTMENT_CLEARANCE_CONDITIONS: Dict[str, List[str]] = {
+    "Police": [
+        "Maintain approved crowd-control barricading and entry screening.",
+        "Keep emergency lanes clear throughout the event duration.",
+    ],
+    "Fire": [
+        "Keep certified extinguishers and fire tender access ready on-site.",
+        "Ensure all emergency exits and evacuation paths remain unobstructed.",
+    ],
+    "Traffic": [
+        "Implement the approved diversion and parking management plan.",
+        "Deploy traffic marshals at designated ingress and egress points.",
+    ],
+    "Municipality": [
+        "Follow approved sanitation and waste-management schedule.",
+        "Operate food stalls only as per municipal hygiene compliance.",
+    ],
+}
 
 
 def _error_detail(exc: Exception, fallback: str) -> str:
@@ -206,6 +227,60 @@ def _derive_due_at(
     return (now + timedelta(hours=default_hours)).isoformat()
 
 
+def _coerce_storage_url(raw_url: Any) -> str:
+    if isinstance(raw_url, str):
+        return raw_url.strip()
+    if isinstance(raw_url, dict):
+        data = raw_url.get("data") if isinstance(raw_url.get("data"), dict) else {}
+        nested = data.get("publicUrl") or data.get("publicURL") or data.get("url")
+        return str(
+            raw_url.get("publicURL")
+            or raw_url.get("publicUrl")
+            or raw_url.get("url")
+            or nested
+            or ""
+        ).strip()
+    if raw_url is None:
+        return ""
+    return str(raw_url).strip()
+
+
+def _department_noc_doc_type(department: Any) -> str:
+    normalized_department = _normalize_department_name(department) or str(department or "").strip()
+    safe_department = normalized_department or "Department"
+    return f"NOC_{safe_department}"
+
+
+def _department_noc_access_url(app_id: str, department: Any) -> str:
+    normalized_department = _normalize_department_name(department) or str(department or "").strip() or "Department"
+    return (
+        f"{BACKEND_PUBLIC_BASE_URL}/api/dept/noc/{app_id}/pdf"
+        f"?department={quote(normalized_department)}"
+    )
+
+
+def _department_conditions(department: Any) -> List[str]:
+    normalized_department = _normalize_department_name(department) or str(department or "").strip()
+    if normalized_department in DEPARTMENT_CLEARANCE_CONDITIONS:
+        return list(DEPARTMENT_CLEARANCE_CONDITIONS[normalized_department])
+    return [
+        f"Comply with all {normalized_department or 'department'} directives for this event clearance."
+    ]
+
+
+def _merge_department_conditions(departments: List[str]) -> List[str]:
+    merged: List[str] = []
+    seen = set()
+    for department_name in departments:
+        for condition in _department_conditions(department_name):
+            key = str(condition).strip().lower()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            merged.append(condition)
+    return merged
+
+
 def _build_document_payload(documents: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     payload = []
     for item in documents:
@@ -217,7 +292,7 @@ def _build_document_payload(documents: List[Dict[str, Any]]) -> List[Dict[str, A
                 "appId": item.get("app_id"),
                 "docType": item.get("doc_type") or "General",
                 "fileName": item.get("file_name") or "document",
-                "url": item.get("storage_url"),
+                "url": _coerce_storage_url(item.get("storage_url")),
                 "uploadedAt": item.get("uploaded_at"),
             }
         )
@@ -234,42 +309,75 @@ def _extract_noc_payload(
     required_departments: List[str],
     status_by_department: Dict[str, str],
     document_payload: List[Dict[str, Any]],
+    routing_rows: List[Dict[str, Any]],
 ) -> Dict[str, Any]:
     department_nocs = []
     final_noc = None
 
+    latest_routing_by_department: Dict[str, Dict[str, Any]] = {}
+    for row in routing_rows:
+        department_name = _normalize_department_name(row.get("department"))
+        if not department_name:
+            continue
+        existing = latest_routing_by_department.get(department_name)
+        if not existing or str(row.get("updated_at") or "") >= str(existing.get("updated_at") or ""):
+            latest_routing_by_department[department_name] = row
+
+    department_docs: Dict[str, Dict[str, Any]] = {}
+    final_document = None
     for document in document_payload:
         doc_type = str(document.get("docType") or "")
-        if doc_type.startswith("NOC_") and doc_type != "NOC_FINAL":
-            department_nocs.append(
-                {
-                    "applicationId": app_id,
-                    "department": doc_type.replace("NOC_", ""),
-                    "approvedBy": None,
-                    "timestamp": document.get("uploadedAt"),
-                    "conditions": [],
-                    "remarks": "",
-                    "fileName": document.get("fileName"),
-                    "url": document.get("url"),
-                }
-            )
         if doc_type == "NOC_FINAL":
-            final_noc = {
-                "permitId": f"UTTSAV-NOC-{app_id}",
+            final_document = document
+            continue
+        if not doc_type.startswith("NOC_"):
+            continue
+        department_name = _normalize_department_name(doc_type.replace("NOC_", ""))
+        if not department_name:
+            continue
+        existing_doc = department_docs.get(department_name)
+        if not existing_doc or str(document.get("uploadedAt") or "") >= str(existing_doc.get("uploadedAt") or ""):
+            department_docs[department_name] = document
+
+    approved_departments = [
+        department_name
+        for department_name in required_departments
+        if status_by_department.get(department_name) == "Approved"
+    ]
+
+    for department_name in approved_departments:
+        document = department_docs.get(department_name)
+        if not document:
+            continue
+        routing_row = latest_routing_by_department.get(department_name) or {}
+        remarks = str(routing_row.get("rejection_reason") or "").strip() or DEFAULT_DEPARTMENT_REMARK
+        department_nocs.append(
+            {
                 "applicationId": app_id,
-                "eventName": event_name,
-                "approvedDepartments": [
-                    department_name
-                    for department_name in required_departments
-                    if status_by_department.get(department_name) == "Approved"
-                ],
-                "issueDate": document.get("uploadedAt"),
-                "validity": "As per departmental rules and event timeline",
-                "combinedConditions": [],
-                "qrCode": _final_noc_access_url(app_id),
-                "url": document.get("url"),
-                "fileName": document.get("fileName"),
+                "department": department_name,
+                "approvedBy": routing_row.get("reviewed_by"),
+                "timestamp": document.get("uploadedAt") or routing_row.get("updated_at"),
+                "conditions": _department_conditions(department_name),
+                "remarks": remarks,
+                "fileName": document.get("fileName") or f"NOC-{department_name}-{app_id}.pdf",
+                "url": _department_noc_access_url(app_id, department_name),
+                "qrCode": _department_noc_access_url(app_id, department_name),
             }
+        )
+
+    if final_document:
+        final_noc = {
+            "permitId": f"UTTSAV-NOC-{app_id}",
+            "applicationId": app_id,
+            "eventName": event_name,
+            "approvedDepartments": approved_departments,
+            "issueDate": final_document.get("uploadedAt"),
+            "validity": FINAL_NOC_VALIDITY_TEXT,
+            "combinedConditions": _merge_department_conditions(approved_departments),
+            "qrCode": _final_noc_access_url(app_id),
+            "url": _final_noc_access_url(app_id),
+            "fileName": final_document.get("fileName") or f"NOC-FINAL-{app_id}.pdf",
+        }
 
     return {
         "departmentNOCs": department_nocs,
@@ -375,6 +483,7 @@ def _serialize_department_application(bundle: Dict[str, Any], department: Option
         required_departments=required_departments,
         status_by_department=status_by_department,
         document_payload=document_payload,
+        routing_rows=routing_rows,
     )
 
     return {
@@ -583,13 +692,30 @@ def _insert_noc_document_record(
                 "app_id": app_id,
                 "doc_type": doc_type,
                 "file_name": file_name,
-                "storage_url": storage_url,
+                "storage_url": _coerce_storage_url(storage_url),
             }
         )
         .execute()
     )
     row = first_row(response.data)
     return row.get("id") if row else None
+
+
+def _fetch_latest_noc_document(app_id: str, doc_types: List[str]) -> Optional[Dict[str, Any]]:
+    candidates = [str(doc_type).strip() for doc_type in doc_types if str(doc_type).strip()]
+    if not candidates:
+        return None
+
+    response = (
+        db.table("documents")
+        .select("id, file_name, storage_url, doc_type, uploaded_at")
+        .eq("app_id", app_id)
+        .in_("doc_type", candidates)
+        .order("uploaded_at", desc=True)
+        .limit(1)
+        .execute()
+    )
+    return first_row(response.data)
 
 
 def _mark_application_noc_approved(app_id: str) -> None:
@@ -797,52 +923,69 @@ def _cascade_rejection_to_other_departments(
     actor_id: str,
     reason: str,
 ) -> None:
+    acted_department_name = _normalize_department_name(acted_department) or str(acted_department or "").strip()
     try:
         response = db.table("department_routings").select("id, department, status").eq("app_id", app_id).execute()
         for row in response.data or []:
-            if str(row.get("department") or "") == acted_department:
+            row_department_name = _normalize_department_name(row.get("department")) or str(
+                row.get("department") or ""
+            ).strip()
+            if row_department_name == acted_department_name:
                 continue
             normalized_status = _normalize_routing_status(row.get("status"))
             if normalized_status in {"Rejected", "Approved"}:
                 continue
-            _update_department_routing_by_id(
-                routing_id=str(row.get("id")),
-                payload={
-                    "status": "Rejected",
-                    "rejection_reason": f"Closed after {acted_department} rejection: {reason}",
-                    "reviewed_by": actor_id,
-                    "reviewed_at": datetime.now(UTC).isoformat(),
-                },
-            )
+            closed_reason = f"Closed after {acted_department_name} rejection: {reason}"
+            for status_candidate in ("Rejected", "Denied"):
+                try:
+                    _update_department_routing_by_id(
+                        routing_id=str(row.get("id")),
+                        payload={
+                            "status": status_candidate,
+                            "rejection_reason": closed_reason,
+                            "reviewed_by": actor_id,
+                            "reviewed_at": datetime.now(UTC).isoformat(),
+                        },
+                    )
+                    break
+                except Exception:
+                    continue
     except Exception:
         return
 
 
-def _generate_final_noc_for_application(app_id: str, department: str) -> Dict[str, Any]:
-    existing_noc = (
-        db.table("documents")
-        .select("id, file_name, storage_url, uploaded_at")
-        .eq("app_id", app_id)
-        .eq("doc_type", "NOC_FINAL")
-        .order("uploaded_at", desc=True)
-        .limit(1)
-        .execute()
-    )
-    existing_row = first_row(existing_noc.data)
+def _generate_final_noc_for_application(app_id: str) -> Dict[str, Any]:
+    existing_row = _fetch_latest_noc_document(app_id, ["NOC_FINAL"])
     if existing_row:
         return {
             "permit_id": f"UTTSAV-NOC-{app_id}",
-            "noc_url": existing_row.get("storage_url"),
+            "noc_url": _final_noc_access_url(app_id),
             "document_id": existing_row.get("id"),
             "qr_code": _final_noc_access_url(app_id),
         }
 
-    routing_rows = db.table("department_routings").select("status").eq("app_id", app_id).execute().data or []
+    routing_rows = (
+        db.table("department_routings")
+        .select("department, status")
+        .eq("app_id", app_id)
+        .execute()
+        .data
+        or []
+    )
     if not routing_rows:
         raise HTTPException(status_code=400, detail="No department routing found for this application")
     if _derive_overall_status_from_routings(routing_rows) != "Approved":
         raise HTTPException(status_code=409, detail="Final NOC can be generated only after all department approvals")
 
+    approved_departments = []
+    for row in routing_rows:
+        department_name = _normalize_department_name(row.get("department"))
+        if not department_name:
+            continue
+        if _normalize_routing_status(row.get("status")) == "Approved" and department_name not in approved_departments:
+            approved_departments.append(department_name)
+
+    combined_conditions = _merge_department_conditions(approved_departments)
     bundle = _fetch_application_bundle(app_id, department=None)
     permit_id = f"UTTSAV-NOC-{app_id}"
     qr_payload = _final_noc_access_url(app_id)
@@ -851,11 +994,7 @@ def _generate_final_noc_for_application(app_id: str, department: str) -> Dict[st
         noc_title="Final Combined No Objection Certificate",
         permit_id=permit_id,
         qr_payload=qr_payload,
-        conditions=[
-            "Comply with all issued departmental clearances.",
-            "Maintain public safety and emergency access routes.",
-            "Follow permitted time windows and crowd limits.",
-        ],
+        conditions=combined_conditions,
     )
     pdf_bytes = pdf_buffer.getvalue()
     file_name = f"NOC-FINAL-{app_id}.pdf"
@@ -864,7 +1003,7 @@ def _generate_final_noc_for_application(app_id: str, department: str) -> Dict[st
     _mark_application_noc_approved(app_id)
     return {
         "permit_id": permit_id,
-        "noc_url": noc_url,
+        "noc_url": _final_noc_access_url(app_id),
         "document_id": document_id,
         "qr_code": qr_payload,
     }
@@ -1246,37 +1385,56 @@ async def update_department_action(
             overall_status = _sync_application_status(app_id)
 
         if normalized_action == "Approved":
-            department_noc_bundle = _fetch_application_bundle(app_id, department=None)
-            department_qr = f"{_final_noc_access_url(app_id)}?department={target_department}"
-            department_noc_pdf = _build_noc_pdf(
-                bundle=department_noc_bundle,
-                noc_title=f"{target_department} Department Clearance Certificate",
-                permit_id=f"UTTSAV-{target_department.upper()}-{app_id}",
-                qr_payload=department_qr,
-                remarks=reason or "",
-                conditions=[
-                    f"All {target_department} department checks marked compliant for this stage.",
-                ],
+            department_doc_type = _department_noc_doc_type(target_department)
+            existing_department_noc = _fetch_latest_noc_document(
+                app_id,
+                [department_doc_type, department_doc_type.upper()],
             )
-            dept_noc_url = _upload_noc_pdf(app_id, department_noc_pdf.getvalue())
-            dept_noc_doc_id = _insert_noc_document_record(
-                app_id=app_id,
-                file_name=f"NOC-{target_department}-{app_id}.pdf",
-                storage_url=dept_noc_url,
-                doc_type=f"NOC_{target_department}",
+            dept_noc_doc_id = existing_department_noc.get("id") if existing_department_noc else None
+            dept_noc_timestamp = (
+                existing_department_noc.get("uploaded_at")
+                if existing_department_noc
+                else datetime.now(UTC).isoformat()
             )
+
+            department_conditions = _department_conditions(target_department)
+            department_remarks = reason or DEFAULT_DEPARTMENT_REMARK
+
+            if not existing_department_noc:
+                department_noc_bundle = _fetch_application_bundle(app_id, department=None)
+                department_qr = _department_noc_access_url(app_id, target_department)
+                department_noc_pdf = _build_noc_pdf(
+                    bundle=department_noc_bundle,
+                    noc_title=f"{target_department} Department Clearance Certificate",
+                    permit_id=f"UTTSAV-{target_department.upper()}-{app_id}",
+                    qr_payload=department_qr,
+                    remarks=department_remarks,
+                    conditions=department_conditions,
+                )
+                dept_noc_storage_url = _upload_noc_pdf(app_id, department_noc_pdf.getvalue())
+                dept_noc_doc_id = _insert_noc_document_record(
+                    app_id=app_id,
+                    file_name=f"NOC-{target_department}-{app_id}.pdf",
+                    storage_url=dept_noc_storage_url,
+                    doc_type=department_doc_type,
+                )
+
             noc = {
                 "departmentNOC": {
                     "department": target_department,
-                    "url": dept_noc_url,
+                    "url": _department_noc_access_url(app_id, target_department),
                     "document_id": dept_noc_doc_id,
+                    "timestamp": dept_noc_timestamp,
+                    "conditions": department_conditions,
+                    "remarks": department_remarks,
+                    "qr_code": _department_noc_access_url(app_id, target_department),
                 }
             }
 
             if overall_status == "Approved":
                 noc = {
                     **(noc or {}),
-                    "finalNOC": _generate_final_noc_for_application(app_id, department=department),
+                    "finalNOC": _generate_final_noc_for_application(app_id),
                 }
 
         return {
@@ -1361,7 +1519,7 @@ async def generate_noc_certificate(app_id: str, current=Depends(get_current_user
         raise HTTPException(status_code=400, detail="Unable to resolve department for current user")
 
     try:
-        result = _generate_final_noc_for_application(app_id, department=department)
+        result = _generate_final_noc_for_application(app_id)
 
         return {
             "status": "success",
@@ -1387,44 +1545,56 @@ async def generate_noc_certificate_alias(app_id: str, current=Depends(get_curren
     return await generate_noc_certificate(app_id, current)
 
 
-@router.get("/api/dept/noc/{app_id}/pdf")
-async def fetch_noc_pdf(app_id: str):
-    try:
-        response = (
-            db.table("documents")
-            .select("id, file_name, storage_url, doc_type, uploaded_at")
-            .eq("app_id", app_id)
-            .in_("doc_type", ["NOC_FINAL", "NOC"])
-            .order("uploaded_at", desc=True)
-            .limit(1)
-            .execute()
+async def _build_pdf_response_from_storage_url(storage_url: str, file_name: str) -> Response:
+    if storage_url.startswith("data:application/pdf;base64,"):
+        encoded_pdf = storage_url.split(",", 1)[1]
+        pdf_bytes = base64.b64decode(encoded_pdf)
+        return Response(
+            content=pdf_bytes,
+            media_type="application/pdf",
+            headers={"Content-Disposition": f'inline; filename="{file_name}"'},
         )
-        document = first_row(response.data)
+
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        upstream = await client.get(storage_url)
+        upstream.raise_for_status()
+        return Response(
+            content=upstream.content,
+            media_type="application/pdf",
+            headers={"Content-Disposition": f'inline; filename="{file_name}"'},
+        )
+
+
+@router.get("/api/dept/noc/{app_id}/pdf")
+async def fetch_noc_pdf(app_id: str, department: Optional[str] = None):
+    try:
+        if department:
+            normalized_department = _normalize_department_name(department) or str(department).strip()
+            department_doc_type = _department_noc_doc_type(normalized_department)
+            document = _fetch_latest_noc_document(
+                app_id,
+                [
+                    department_doc_type,
+                    department_doc_type.upper(),
+                    f"NOC_{normalized_department}",
+                ],
+            )
+        else:
+            document = _fetch_latest_noc_document(app_id, ["NOC_FINAL", "NOC"])
+
         if not document:
+            if department:
+                raise HTTPException(status_code=404, detail="Department NOC document not found")
             raise HTTPException(status_code=404, detail="NOC document not found")
 
-        file_name = document.get("file_name") or f"NOC-{app_id}.pdf"
-        storage_url = str(document.get("storage_url") or "")
+        file_name = document.get("file_name") or (
+            f"NOC-{department}-{app_id}.pdf" if department else f"NOC-{app_id}.pdf"
+        )
+        storage_url = _coerce_storage_url(document.get("storage_url"))
         if not storage_url:
             raise HTTPException(status_code=404, detail="NOC document URL not found")
 
-        if storage_url.startswith("data:application/pdf;base64,"):
-            encoded_pdf = storage_url.split(",", 1)[1]
-            pdf_bytes = base64.b64decode(encoded_pdf)
-            return Response(
-                content=pdf_bytes,
-                media_type="application/pdf",
-                headers={"Content-Disposition": f'inline; filename="{file_name}"'},
-            )
-
-        async with httpx.AsyncClient(timeout=20.0) as client:
-            upstream = await client.get(storage_url)
-            upstream.raise_for_status()
-            return Response(
-                content=upstream.content,
-                media_type="application/pdf",
-                headers={"Content-Disposition": f'inline; filename="{file_name}"'},
-            )
+        return await _build_pdf_response_from_storage_url(storage_url, file_name)
     except HTTPException:
         raise
     except Exception as exc:

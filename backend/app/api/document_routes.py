@@ -22,6 +22,24 @@ def _safe_extension(filename: Optional[str]) -> str:
     return f".{filename.rsplit('.', 1)[1].lower()}"
 
 
+def _coerce_public_url(raw_url: Optional[object]) -> str:
+    if isinstance(raw_url, str):
+        return raw_url.strip()
+    if isinstance(raw_url, dict):
+        data = raw_url.get("data") if isinstance(raw_url.get("data"), dict) else {}
+        nested = data.get("publicUrl") or data.get("publicURL") or data.get("url")
+        return str(
+            raw_url.get("publicURL")
+            or raw_url.get("publicUrl")
+            or raw_url.get("url")
+            or nested
+            or ""
+        ).strip()
+    if raw_url is None:
+        return ""
+    return str(raw_url).strip()
+
+
 def _assert_application_owner(app_id: str, user_id: str) -> None:
     try:
         response = (
@@ -82,7 +100,7 @@ async def upload_document(
                 file=content,
                 file_options={"content-type": content_type, "upsert": "true"},
             )
-        public_url = db.storage.from_(DOCUMENT_BUCKET).get_public_url(storage_path)
+        public_url = _coerce_public_url(db.storage.from_(DOCUMENT_BUCKET).get_public_url(storage_path))
 
         payload_candidates = [
             {

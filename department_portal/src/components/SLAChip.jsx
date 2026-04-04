@@ -9,16 +9,20 @@ const toneClassMap = {
 };
 
 const SLAChip = ({ dueAt }) => {
-  const [, setTick] = useState(0);
+  const [nowMs, setNowMs] = useState(Date.now());
 
   useEffect(() => {
-    const intervalId = setInterval(() => {
-      setTick((value) => value + 1);
-    }, 30000);
-    return () => clearInterval(intervalId);
-  }, []);
+    const dueTime = new Date(dueAt).getTime();
+    const remainingMs = Number.isFinite(dueTime) ? dueTime - Date.now() : 0;
+    const refreshMs = remainingMs <= 60 * 60 * 1000 ? 15000 : 60000;
 
-  const slaMeta = getSlaMeta(dueAt);
+    const intervalId = setInterval(() => {
+      setNowMs(Date.now());
+    }, refreshMs);
+    return () => clearInterval(intervalId);
+  }, [dueAt]);
+
+  const slaMeta = getSlaMeta(dueAt, nowMs);
 
   return (
     <span

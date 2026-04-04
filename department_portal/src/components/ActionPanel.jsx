@@ -15,6 +15,7 @@ const ActionPanel = ({
 }) => {
   const [comment, setComment] = useState('');
   const isHighRisk = riskLevel === 'High';
+  const isFinalized = currentStatus === 'Approved' || currentStatus === 'Rejected';
   const slaMeta = getSlaMeta(dueAt);
   const isUrgentByTime = slaMeta.priorityRank <= 2;
 
@@ -69,6 +70,17 @@ const ActionPanel = ({
         <h3 className="text-base font-semibold text-textMain">Action Panel</h3>
         <p className="mt-2 text-sm text-textSecondary">
           Admin can monitor workflow but cannot issue department approvals.
+        </p>
+      </div>
+    );
+  }
+
+  if (isFinalized) {
+    return (
+      <div className="rounded-2xl border border-borderMain bg-cardBg p-4 shadow-card">
+        <h3 className="text-base font-semibold text-textMain">Action Panel</h3>
+        <p className="mt-2 text-sm text-textSecondary">
+          Current Status: {currentStatus}. This application stage is closed for further decisions.
         </p>
       </div>
     );

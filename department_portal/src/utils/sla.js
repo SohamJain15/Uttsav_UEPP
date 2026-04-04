@@ -1,27 +1,28 @@
 const HOUR_MS = 1000 * 60 * 60;
 const MINUTE_MS = 1000 * 60;
 
-const formatRemainingLabel = (remainingMinutes) => {
-  if (remainingMinutes <= 0) {
+const formatRemainingLabel = (remainingMs) => {
+  if (remainingMs <= 0) {
     return 'SLA Breached';
   }
 
-  const totalHours = Math.floor(remainingMinutes / 60);
-  const days = Math.floor(totalHours / 24);
-  const hours = totalHours % 24;
+  const totalMinutes = Math.max(1, Math.floor(remainingMs / MINUTE_MS));
+  const days = Math.floor(totalMinutes / (24 * 60));
+  const hours = Math.floor((totalMinutes % (24 * 60)) / 60);
+  const minutes = totalMinutes % 60;
 
   if (days > 0) {
-    return `${days}d ${hours}h left`;
+    return `${days}d ${hours}h ${minutes}m left`;
   }
 
-  if (totalHours >= 1) {
-    return `${totalHours}h left`;
+  if (hours >= 1) {
+    return `${hours}h ${minutes}m left`;
   }
 
-  return `${Math.max(1, remainingMinutes)}m left`;
+  return `${minutes}m left`;
 };
 
-export const getSlaMeta = (dueAt) => {
+export const getSlaMeta = (dueAt, nowMs = Date.now()) => {
   const dueTime = new Date(dueAt).getTime();
   if (!Number.isFinite(dueTime)) {
     return {
@@ -35,8 +36,7 @@ export const getSlaMeta = (dueAt) => {
     };
   }
 
-  const now = Date.now();
-  const remainingMs = dueTime - now;
+  const remainingMs = dueTime - nowMs;
   const remainingMinutes = Math.floor(remainingMs / MINUTE_MS);
   const remainingHours = remainingMs / HOUR_MS;
 
@@ -55,7 +55,7 @@ export const getSlaMeta = (dueAt) => {
   if (remainingHours <= 12) {
     return {
       tone: 'orange',
-      label: formatRemainingLabel(remainingMinutes),
+      label: formatRemainingLabel(remainingMs),
       className: 'text-statusOrange',
       priority: 'High',
       priorityRank: 2,
@@ -67,7 +67,7 @@ export const getSlaMeta = (dueAt) => {
   if (remainingHours <= 24) {
     return {
       tone: 'yellow',
-      label: formatRemainingLabel(remainingMinutes),
+      label: formatRemainingLabel(remainingMs),
       className: 'text-statusYellow',
       priority: 'Medium',
       priorityRank: 3,
@@ -78,7 +78,7 @@ export const getSlaMeta = (dueAt) => {
 
   return {
     tone: 'green',
-    label: formatRemainingLabel(remainingMinutes),
+    label: formatRemainingLabel(remainingMs),
     className: 'text-statusGreen',
     priority: 'Low',
     priorityRank: 4,

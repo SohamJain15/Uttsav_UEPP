@@ -47,18 +47,34 @@ const getCityFromAddress = (address = "") => {
   return parts[parts.length - 1] || address;
 };
 
+const backendOrigin = (import.meta.env.VITE_BACKEND_ORIGIN || "http://localhost:8000")
+  .trim()
+  .replace(/\/$/, "");
+
+const toSafeUrl = (rawUrl) => {
+  if (typeof rawUrl !== "string") return "";
+  const trimmed = rawUrl.trim();
+  if (!trimmed) return "";
+  if (trimmed.startsWith("/")) {
+    return `${backendOrigin}${trimmed}`;
+  }
+  return trimmed;
+};
+
 const downloadFile = async (url, fileName) => {
-  if (!url) return;
-  if (url.startsWith("data:")) {
+  const safeUrl = toSafeUrl(url);
+  if (!safeUrl) return;
+  if (safeUrl.startsWith("data:")) {
     const anchor = document.createElement("a");
-    anchor.href = url;
+    anchor.href = safeUrl;
     anchor.download = fileName || "document.pdf";
+    anchor.rel = "noopener noreferrer";
     document.body.appendChild(anchor);
     anchor.click();
     anchor.remove();
     return;
   }
-  const response = await fetch(url);
+  const response = await fetch(safeUrl);
   if (!response.ok) {
     throw new Error(`Download failed (${response.status})`);
   }
@@ -81,6 +97,7 @@ const ApplicationTrackingPage = () => {
   const [error, setError] = useState("");
   const [queryResponses, setQueryResponses] = useState({});
   const [queryMessage, setQueryMessage] = useState("");
+  const [fileMessage, setFileMessage] = useState("");
   const [isSubmittingQuery, setIsSubmittingQuery] = useState(false);
   const inFlightRef = useRef(false);
   const hasLoadedRef = useRef(false);
@@ -173,6 +190,15 @@ const ApplicationTrackingPage = () => {
   const departmentsWithRequests = timelineItems.filter((item) => item.needsAction);
   const finalNOC = application?.finalNOC || null;
   const departmentNOCs = Array.isArray(application?.departmentNOCs) ? application.departmentNOCs : [];
+  const requiredCount = timelineItems.length;
+  const approvedCount = timelineItems.filter((item) => item.status === "Approved").length;
+  const approvalProgressLabel =
+    requiredCount === 0
+      ? "No departments assigned"
+      : requiredCount > 0 && approvedCount === requiredCount
+      ? "All departments cleared"
+      : `${approvedCount}/${requiredCount} departments approved`;
+  const finalNocUrl = toSafeUrl(finalNOC?.url || finalNOC?.qrCode || "");
 
   const handleQueryResponse = async (departmentName) => {
     const responseText = String(queryResponses[departmentName] || "").trim();
@@ -207,6 +233,25 @@ const ApplicationTrackingPage = () => {
     } finally {
       setIsSubmittingQuery(false);
     }
+  };
+
+  const handleFileDownload = async (url, fileName, label = "document") => {
+    try {
+      await downloadFile(url, fileName);
+      setFileMessage("");
+    } catch (error) {
+      setFileMessage(`Unable to download ${label} right now. Please try again.`);
+    }
+  };
+
+  const handleFileView = (url, label = "document") => {
+    const safeUrl = toSafeUrl(url);
+    if (!safeUrl) {
+      setFileMessage(`No ${label} file is available yet.`);
+      return;
+    }
+    setFileMessage("");
+    window.open(safeUrl, "_blank", "noopener,noreferrer");
   };
 
   const infoItems = [
@@ -327,6 +372,11 @@ const ApplicationTrackingPage = () => {
         </section>
       ) : null}
 
+      <section className="rounded-[12px] border border-gray-200 bg-white p-5">
+        <h3 className="text-[16px] font-semibold text-[#0F172A]">Approval Progress</h3>
+        <p className="mt-2 text-sm text-[#475569]">{approvalProgressLabel}</p>
+      </section>
+
       <section>
         <h3 className="mb-4 mt-8 text-[18px] font-semibold text-[#0F172A]">Approval Timeline</h3>
         <div className="relative">
@@ -411,18 +461,35 @@ const ApplicationTrackingPage = () => {
               <p className="mt-1 text-sm text-[#166534]">
                 Issue Date: {formatDate(finalNOC.issueDate || application?.updatedAt)}
               </p>
+              <p className="mt-1 text-sm text-[#166534]">
+                Status: {approvalProgressLabel}
+              </p>
+              {Array.isArray(finalNOC.combinedConditions) && finalNOC.combinedConditions.length > 0 ? (
+                <div className="mt-3 rounded-md border border-[#BBF7D0] bg-white p-3">
+                  <p className="text-xs font-semibold text-[#166534]">Final Conditions Summary</p>
+                  <ul className="mt-2 list-disc space-y-1 pl-5 marker:text-[#166534]">
+                    {finalNOC.combinedConditions.map((condition) => (
+                      <li key={condition} className="text-xs text-[#166534]">
+                        {condition}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
               <div className="mt-3 flex flex-wrap gap-2">
                 <button
                   type="button"
-                  onClick={() => downloadFile(finalNOC.url, finalNOC.fileName)}
-                  className="rounded-md bg-[#166534] px-4 py-2 text-sm font-semibold text-white"
+                  onClick={() => handleFileDownload(finalNocUrl, finalNOC.fileName, "final NOC")}
+                  disabled={!finalNocUrl}
+                  className="rounded-md bg-[#166534] px-4 py-2 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-60"
                 >
                   Download Final NOC
                 </button>
                 <button
                   type="button"
-                  onClick={() => window.open(finalNOC.url, "_blank", "noopener,noreferrer")}
-                  className="rounded-md border border-[#166534] px-4 py-2 text-sm font-semibold text-[#166534]"
+                  onClick={() => handleFileView(finalNocUrl, "final NOC")}
+                  disabled={!finalNocUrl}
+                  className="rounded-md border border-[#166534] px-4 py-2 text-sm font-semibold text-[#166534] disabled:cursor-not-allowed disabled:opacity-60"
                 >
                   View Final NOC
                 </button>
@@ -432,7 +499,7 @@ const ApplicationTrackingPage = () => {
               <p className="text-xs font-semibold text-[#166534]">Verification QR</p>
               <img
                 src={`https://api.qrserver.com/v1/create-qr-code/?size=170x170&data=${encodeURIComponent(
-                  finalNOC.qrCode || finalNOC.url || ""
+                  finalNOC.qrCode || finalNocUrl || ""
                 )}`}
                 alt="Final NOC Verification QR"
                 className="mt-2 h-[130px] w-[130px] rounded-md border border-[#DCFCE7]"
@@ -455,18 +522,35 @@ const ApplicationTrackingPage = () => {
                 <p className="mt-1 text-sm text-gray-500">
                   Issued: {formatDate(noc.timestamp || application?.updatedAt)}
                 </p>
+                {Array.isArray(noc.conditions) && noc.conditions.length > 0 ? (
+                  <div className="mt-2">
+                    <p className="text-xs font-semibold text-[#475569]">Conditions</p>
+                    <ul className="mt-1 list-disc space-y-1 pl-5 marker:text-[#1E40AF]">
+                      {noc.conditions.map((condition) => (
+                        <li key={`${noc.department}-${condition}`} className="text-xs text-[#334155]">
+                          {condition}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                ) : null}
+                {noc.remarks ? (
+                  <p className="mt-2 text-xs text-gray-500">Remarks: {noc.remarks}</p>
+                ) : null}
                 <div className="mt-3 flex flex-wrap gap-2">
                   <button
                     type="button"
-                    onClick={() => window.open(noc.url, "_blank", "noopener,noreferrer")}
-                    className="rounded-md border border-[#1E40AF] px-3 py-1.5 text-sm font-semibold text-[#1E40AF]"
+                    onClick={() => handleFileView(noc.url, `${noc.department} NOC`)}
+                    disabled={!toSafeUrl(noc.url || "")}
+                    className="rounded-md border border-[#1E40AF] px-3 py-1.5 text-sm font-semibold text-[#1E40AF] disabled:cursor-not-allowed disabled:opacity-60"
                   >
                     View NOC
                   </button>
                   <button
                     type="button"
-                    onClick={() => downloadFile(noc.url, noc.fileName)}
-                    className="rounded-md bg-[#1E40AF] px-3 py-1.5 text-sm font-semibold text-white"
+                    onClick={() => handleFileDownload(noc.url, noc.fileName, `${noc.department} NOC`)}
+                    disabled={!toSafeUrl(noc.url || "")}
+                    className="rounded-md bg-[#1E40AF] px-3 py-1.5 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-60"
                   >
                     Download NOC
                   </button>
@@ -474,6 +558,12 @@ const ApplicationTrackingPage = () => {
               </div>
             ))}
           </div>
+        </section>
+      ) : null}
+
+      {fileMessage ? (
+        <section className="rounded-[12px] border border-[#FECACA] bg-[#FEF2F2] p-4">
+          <p className="text-sm text-[#B91C1C]">{fileMessage}</p>
         </section>
       ) : null}
 

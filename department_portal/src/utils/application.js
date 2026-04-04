@@ -32,15 +32,20 @@ const pickStatusByRole = (statusByDepartment, role) => {
 };
 
 export const getDepartmentStatus = (application, role) => {
+  const overallStatus = normalizeStatus(application.overallStatus);
   if (String(role || '').trim().toLowerCase() === 'admin') {
-    return normalizeStatus(application.overallStatus);
+    return overallStatus;
+  }
+
+  if (overallStatus === 'Rejected') {
+    return 'Rejected';
   }
 
   const byDepartment = application.statusByDepartment || {};
   const picked =
     pickStatusByRole(byDepartment, role) ??
     application.departmentStatus ??
-    application.overallStatus ??
+    overallStatus ??
     'Pending';
   return normalizeStatus(picked);
 };

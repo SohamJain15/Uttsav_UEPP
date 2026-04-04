@@ -54,7 +54,7 @@ const getProgressText = (application) => {
   if (completeCount === requiredDepartments.length) {
     return 'All departments cleared';
   }
-  return `${completeCount}/${requiredDepartments.length} completed`;
+  return `${completeCount}/${requiredDepartments.length} departments approved`;
 };
 
 const ApplicationDetailPage = () => {
@@ -325,6 +325,18 @@ const ApplicationDetailPage = () => {
                     <p className="mt-1 text-xs text-textSecondary">
                       Remarks: {noc.remarks || 'No additional remarks'}
                     </p>
+                    {Array.isArray(noc.conditions) && noc.conditions.length ? (
+                      <div className="mt-2">
+                        <p className="text-xs font-semibold text-textSecondary">Conditions</p>
+                        <ul className="mt-1 list-disc space-y-1 pl-5">
+                          {noc.conditions.map((condition) => (
+                            <li key={`${noc.department}-${condition}`} className="text-xs text-textMain">
+                              {condition}
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    ) : null}
                     {noc.url ? (
                       <div className="mt-2">
                         <DocumentRow document={{ fileName: noc.fileName || `${noc.department}-NOC.pdf`, url: noc.url }} />
@@ -360,6 +372,18 @@ const ApplicationDetailPage = () => {
               <p className="mt-1 text-sm text-textSecondary">
                 All Departments Cleared ({approvedCount}/{requiredDepartments.length})
               </p>
+              {Array.isArray(finalNOC.combinedConditions) && finalNOC.combinedConditions.length ? (
+                <div className="mt-3 rounded-xl border border-borderMain bg-white p-3">
+                  <p className="text-xs font-semibold text-textSecondary">Final Conditions Summary</p>
+                  <ul className="mt-2 list-disc space-y-1 pl-5">
+                    {finalNOC.combinedConditions.map((condition) => (
+                      <li key={condition} className="text-xs text-textMain">
+                        {condition}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
               <div className="mt-3 flex flex-wrap gap-2">
                 {finalNOC.url ? (
                   <DocumentRow
