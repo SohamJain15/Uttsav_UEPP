@@ -133,6 +133,8 @@ def _enrich_profile(profile: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any
         enriched["full_name"] = enriched.get("name")
     if not enriched.get("phone_number") and enriched.get("phone"):
         enriched["phone_number"] = enriched.get("phone")
+    if not enriched.get("organization") and enriched.get("organization_type"):
+        enriched["organization"] = enriched.get("organization_type")
     if not enriched.get("organization"):
         enriched["organization"] = None
     if not enriched.get("username"):
@@ -187,6 +189,7 @@ def _validate_department_login_password(user_row: Dict[str, Any], password: str)
 
 def _user_payload_candidates(user_id: str, email: str, payload: Dict[str, Any]) -> list[Dict[str, Any]]:
     department = _normalize_department(payload.get("department"))
+    username = _normalize_username(payload.get("username")) or _generate_username(user_id, department)
     return [
         {
             "id": user_id,
@@ -194,7 +197,33 @@ def _user_payload_candidates(user_id: str, email: str, payload: Dict[str, Any]) 
             "name": payload.get("full_name"),
             "phone": payload.get("phone_number"),
             "role": department,
-            "is_verified": True,
+            "prefix": username,
+            "organization_type": payload.get("organization"),
+            "is_active": True,
+        },
+        {
+            "id": user_id,
+            "email": email,
+            "name": payload.get("full_name"),
+            "phone": payload.get("phone_number"),
+            "role": department,
+            "prefix": username,
+            "organization_type": payload.get("organization"),
+        },
+        {
+            "id": user_id,
+            "email": email,
+            "name": payload.get("full_name"),
+            "phone": payload.get("phone_number"),
+            "role": department,
+            "prefix": username,
+        },
+        {
+            "id": user_id,
+            "email": email,
+            "name": payload.get("full_name"),
+            "phone": payload.get("phone_number"),
+            "role": department,
         },
     ]
 
@@ -269,6 +298,8 @@ async def register_user(payload: AuthRegisterRequest):
                 "full_name": payload.full_name,
                 "phone_number": payload.phone_number,
                 "department": department,
+                "organization": payload.organization,
+                "username": username,
             },
         )
 

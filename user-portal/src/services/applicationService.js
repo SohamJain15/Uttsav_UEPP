@@ -147,6 +147,8 @@ const buildRiskApiCandidates = () => {
   return Array.from(new Set(candidates));
 };
 
+const RISK_REQUEST_TIMEOUT_MS = 25000;
+
 const buildApprovalPayload = (payload = {}) => ({
   eventType: payload.eventType || payload.event_type || "",
   crowdSize: Number(payload.crowdSize || payload.crowd_size || 0),
@@ -408,7 +410,7 @@ export const applicationService = {
       try {
         const response = await axios.post(endpoint, riskPayload, {
           headers: { "Content-Type": "application/json" },
-          timeout: 10000,
+          timeout: RISK_REQUEST_TIMEOUT_MS,
         });
         return normalizeRiskResponse(response.data, payload);
       } catch (error) {
@@ -417,7 +419,9 @@ export const applicationService = {
     }
 
     try {
-      const response = await api.post("/api/user/risk/calculate", riskPayload);
+      const response = await api.post("/api/user/risk/calculate", riskPayload, {
+        timeout: RISK_REQUEST_TIMEOUT_MS,
+      });
       return normalizeRiskResponse(response.data, payload);
     } catch (error) {
       return {

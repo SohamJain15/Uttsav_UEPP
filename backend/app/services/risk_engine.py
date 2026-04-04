@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import asyncio
+import concurrent.futures
+import json
 import os
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 import joblib
 import numpy as np
@@ -25,6 +30,11 @@ class RiskAssets:
 
 _CACHED_ASSETS: RiskAssets | None = None
 _LOAD_ERROR: str | None = None
+
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/")
+OLLAMA_MODEL = "tinyllama"
+OLLAMA_TIMEOUT_SECONDS = 20
+RECOMMENDATION_FALLBACK = "Deploy additional crowd marshals and maintain emergency access routes."
 
 
 def _resolve_model_dir() -> Path:
@@ -181,30 +191,83 @@ def _clean_feature_name(raw_feature_name: str) -> str:
     return " ".join(part.capitalize() for part in cleaned.split())
 
 
-def _recommend_precaution(top_factors: List[Dict[str, Any]]) -> str:
+def _build_factors_string(top_factors: List[Dict[str, Any]]) -> str:
     if not top_factors:
-        return "Primary risk trigger could not be isolated. Recommended immediate action: deploy additional crowd marshals and keep emergency access lanes fully clear."
-
-    feature_text = " + ".join(factor["feature"] for factor in top_factors[:3])
-    lead_factor = top_factors[0]["feature"].lower()
-
-    if "crowd density" in lead_factor or "capacity utilization" in lead_factor:
-        action = "cap live attendance and enforce one-way crowd movement corridors."
-    elif "people per exit" in lead_factor or "fire exits" in lead_factor:
-        action = "increase emergency exits and keep all evacuation paths obstruction-free."
-    elif "fireworks" in lead_factor:
-        action = "deploy dedicated fire tenders and enforce a controlled pyrotechnics perimeter."
-    elif "road closure" in lead_factor or "moving procession" in lead_factor:
-        action = "issue route diversions in advance and station traffic police at key choke points."
-    elif "food stalls" in lead_factor:
-        action = "mandate fire-safe stall layouts and maintain a continuous sanitation corridor."
-    else:
-        action = "increase on-ground supervision and perform a pre-event emergency drill."
-
-    return (
-        f"Primary risk drivers identified by the AI engine: {feature_text}. "
-        f"Recommended immediate action: {action}"
+        return "No dominant SHAP factors were identified."
+    return ", ".join(
+        [
+            f"{factor.get('feature', 'Unknown factor')} (impact {factor.get('impact', 0)})"
+            for factor in top_factors[:3]
+        ]
     )
+
+
+def _post_json_sync(url: str, payload: Dict[str, Any], timeout_seconds: int) -> Dict[str, Any]:
+    body = json.dumps(payload).encode("utf-8")
+    request = Request(
+        url=url,
+        data=body,
+        method="POST",
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urlopen(request, timeout=timeout_seconds) as response:
+            raw = response.read().decode("utf-8")
+    except HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="ignore")
+        raise RiskEngineError(f"Ollama HTTP {exc.code}: {detail or exc.reason}") from exc
+    except URLError as exc:
+        raise RiskEngineError(f"Ollama connection failed: {exc.reason}") from exc
+    except Exception as exc:
+        raise RiskEngineError(f"Ollama request failed: {exc}") from exc
+
+    try:
+        parsed = json.loads(raw or "{}")
+    except Exception as exc:
+        raise RiskEngineError(f"Ollama returned invalid JSON: {exc}") from exc
+
+    if not isinstance(parsed, dict):
+        raise RiskEngineError("Ollama response must be a JSON object.")
+    return parsed
+
+
+async def _generate_precaution_with_ollama(risk_level: str, top_factors: List[Dict[str, Any]]) -> str:
+    factors_string = _build_factors_string(top_factors)
+    prompt = (
+        "You are an AI safety officer. "
+        f"A predictive model flagged a public event with a {risk_level} risk level. "
+        f"The top contributing factors are: {factors_string}. "
+        "Write a strict, 2-sentence actionable recommendation for government officials to mitigate this risk. "
+        "Do not use pleasantries."
+    )
+    payload = {
+        "model": OLLAMA_MODEL,
+        "prompt": prompt,
+        "stream": False,
+    }
+    try:
+        response = await asyncio.to_thread(
+            _post_json_sync,
+            f"{OLLAMA_BASE_URL}/api/generate",
+            payload,
+            OLLAMA_TIMEOUT_SECONDS,
+        )
+        recommendation = str(response.get("response") or "").strip()
+        if recommendation:
+            return " ".join(recommendation.split())
+    except Exception:
+        return RECOMMENDATION_FALLBACK
+    return RECOMMENDATION_FALLBACK
+
+
+def _run_async(coro: Any) -> Any:
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        return executor.submit(lambda: asyncio.run(coro)).result()
 
 
 def _extract_top_factors(assets: RiskAssets, transformed_input: Any, predicted_class: str) -> List[Dict[str, Any]]:
@@ -350,7 +413,7 @@ def analyze_risk(payload: Dict[str, Any]) -> Dict[str, Any]:
             confidence = float(np.max(probabilities) * 100.0)
 
         top_factors = _extract_top_factors(assets, transformed_input, predicted_class)
-        recommendation = _recommend_precaution(top_factors)
+        recommendation = _run_async(_generate_precaution_with_ollama(predicted_class, top_factors))
 
         return {
             "status": "success",

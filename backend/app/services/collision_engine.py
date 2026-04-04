@@ -8,6 +8,7 @@ import re
 from datetime import UTC, datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlencode
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from app.core.database import db
@@ -93,21 +94,13 @@ def _fetch_route_options(
     mode: str = "walking",
     alternatives: bool = True,
 ) -> List[Dict[str, Any]]:
-    """Fetch route options from Google Maps or return fallback routes"""
+    """Fetch route options from Google Maps."""
     api_key = _google_maps_key()
-    
-    # If no API key, return fallback single route
+
+    # Treat missing key as an API failure so caller can use simulated fallback consistently.
     if not api_key:
-        return [{
-            "route_id": "R1",
-            "summary": f"{origin} to {destination}",
-            "total_distance": "Unknown",
-            "total_duration": "Unavailable",
-            "total_duration_seconds": 3600,  # Assume 1 hour default
-            "encoded_polyline": "",
-            "timeline": [],
-        }]
-    
+        raise CollisionEngineError("Google Directions API key is not configured.")
+
     params = {
         "origin": origin,
         "destination": destination,
@@ -121,6 +114,15 @@ def _fetch_route_options(
     try:
         with urlopen(request, timeout=18) as response:
             raw = response.read().decode("utf-8")
+    except HTTPError as exc:
+        detail = ""
+        try:
+            detail = exc.read().decode("utf-8", errors="ignore")
+        except Exception:
+            detail = str(exc.reason or "")
+        raise CollisionEngineError(f"Google Directions API HTTP {exc.code}: {detail or exc.reason}") from exc
+    except URLError as exc:
+        raise CollisionEngineError(f"Failed to connect to Google Directions API: {exc.reason}") from exc
     except Exception as exc:
         raise CollisionEngineError(f"Failed to connect to Google Directions API: {exc}") from exc
 
@@ -227,23 +229,219 @@ def _build_fallback_timeline(latitude: Any, longitude: Any) -> List[Dict[str, An
     ]
 
 
-def _fetch_existing_events(limit: int = 400) -> List[Dict[str, Any]]:
-    rows = []
-    query_variants = [
-        "status, events(id, name, category, start_time, end_time, latitude, longitude, is_moving_procession, route_timeline)",
-        "status, events(id, name, category, start_time, end_time, latitude, longitude, is_moving_procession)",
+def _parse_event_datetime(raw_value: Any) -> Optional[datetime]:
+    if not raw_value:
+        return None
+    try:
+        return datetime.fromisoformat(str(raw_value).replace("Z", "+00:00")).replace(tzinfo=None)
+    except ValueError:
+        return _parse_datetime(str(raw_value)[:10], str(raw_value)[11:16] if "T" in str(raw_value) else None)
+
+
+def _parse_route_geometry_points(raw_geometry: Any) -> List[Dict[str, float]]:
+    if raw_geometry is None:
+        return []
+
+    geometry_obj = raw_geometry
+    if isinstance(raw_geometry, str):
+        text = raw_geometry.strip()
+        if not text:
+            return []
+        if text.startswith("{"):
+            try:
+                geometry_obj = json.loads(text)
+            except json.JSONDecodeError:
+                geometry_obj = text
+        else:
+            geometry_obj = text
+
+    # GeoJSON-like object.
+    if isinstance(geometry_obj, dict):
+        g_type = str(geometry_obj.get("type") or "").upper()
+        coords = geometry_obj.get("coordinates") or []
+        if g_type == "LINESTRING" and isinstance(coords, list):
+            points = []
+            for coord in coords:
+                if not isinstance(coord, (list, tuple)) or len(coord) < 2:
+                    continue
+                lng = _coerce_float(coord[0], default=float("nan"))
+                lat = _coerce_float(coord[1], default=float("nan"))
+                if math.isnan(lat) or math.isnan(lng):
+                    continue
+                points.append({"lat": lat, "lng": lng})
+            return points
+
+    # WKT / EWKT support: LINESTRING or MULTILINESTRING.
+    if isinstance(geometry_obj, str):
+        text = geometry_obj.strip()
+        if text.upper().startswith("SRID="):
+            parts = text.split(";", 1)
+            text = parts[1] if len(parts) > 1 else text
+        upper_text = text.upper()
+        if upper_text.startswith("MULTILINESTRING"):
+            start = text.find("((")
+            end = text.find("))", start + 2)
+            if start != -1 and end != -1:
+                text = f"LINESTRING({text[start + 2:end]})"
+                upper_text = text.upper()
+        if upper_text.startswith("LINESTRING"):
+            start = text.find("(")
+            end = text.rfind(")")
+            if start == -1 or end == -1 or end <= start:
+                return []
+            coords_text = text[start + 1:end]
+            points = []
+            for pair in coords_text.split(","):
+                raw_pair = pair.strip().split()
+                if len(raw_pair) < 2:
+                    continue
+                lng = _coerce_float(raw_pair[0], default=float("nan"))
+                lat = _coerce_float(raw_pair[1], default=float("nan"))
+                if math.isnan(lat) or math.isnan(lng):
+                    continue
+                points.append({"lat": lat, "lng": lng})
+            return points
+
+    return []
+
+
+def _timeline_from_route_points(
+    points: List[Dict[str, float]],
+    start_dt: datetime,
+    end_dt: datetime,
+    instruction_prefix: str,
+) -> List[Dict[str, Any]]:
+    if not points:
+        return []
+    duration_seconds = int(max((end_dt - start_dt).total_seconds(), 60))
+    if len(points) == 1:
+        offsets = [0]
+    else:
+        offsets = [int(round((duration_seconds * idx) / (len(points) - 1))) for idx in range(len(points))]
+    timeline = []
+    for idx, point in enumerate(points):
+        timeline.append(
+            {
+                "time_offset_seconds": offsets[idx],
+                "end_location": {"lat": point["lat"], "lng": point["lng"]},
+                "instructions": f"{instruction_prefix} point {idx + 1}",
+            }
+        )
+    return timeline
+
+
+def _build_candidate_linestring_wkt(route: Dict[str, Any]) -> str:
+    timeline = route.get("timeline") or []
+    coords = []
+    for step in timeline:
+        loc = step.get("end_location") or {}
+        lat = _coerce_float(loc.get("lat"), default=float("nan"))
+        lng = _coerce_float(loc.get("lng"), default=float("nan"))
+        if math.isnan(lat) or math.isnan(lng):
+            continue
+        coords.append(f"{lng} {lat}")
+    if len(coords) < 2:
+        return ""
+    return f"LINESTRING({', '.join(coords)})"
+
+
+def _build_simulated_route_options(
+    origin: str,
+    destination: str,
+    payload: Dict[str, Any],
+    start_dt: datetime,
+    end_dt: datetime,
+) -> List[Dict[str, Any]]:
+    lat = payload.get("mapLatitude")
+    if lat is None:
+        lat = payload.get("map_latitude")
+    lng = payload.get("mapLongitude")
+    if lng is None:
+        lng = payload.get("map_longitude")
+    timeline = _build_fallback_timeline(lat, lng)
+    return [
+        {
+            "route_id": "R1",
+            "summary": f"Simulated route: {origin} to {destination}",
+            "total_distance": "Unavailable",
+            "total_duration": "Unavailable",
+            "total_duration_seconds": int(max((end_dt - start_dt).total_seconds(), 3600)),
+            "encoded_polyline": "",
+            "timeline": timeline,
+            "is_simulated": True,
+        }
     ]
 
+
+def _fetch_postgis_spatial_event_ids(
+    candidate_start_dt: datetime,
+    candidate_end_dt: datetime,
+    candidate_linestring_wkt: str,
+    spatial_threshold_m: float,
+) -> Tuple[Optional[set[str]], str]:
+    if not candidate_linestring_wkt:
+        return None, "candidate_geometry_missing"
+
+    start_iso = candidate_start_dt.isoformat()
+    end_iso = candidate_end_dt.isoformat()
+    # Variant expressions for PostgREST + PostGIS syntax differences.
+    filter_values = [
+        f"SRID=4326;{candidate_linestring_wkt},{spatial_threshold_m}",
+        f"SRID=4326;{candidate_linestring_wkt},{spatial_threshold_m},true",
+    ]
+
+    last_error: Optional[Exception] = None
+    for filter_value in filter_values:
+        try:
+            response = (
+                db.table("events")
+                .select("id")
+                .not_.is_("route_geometry", "null")
+                .lte("start_time", end_iso)
+                .gte("end_time", start_iso)
+                .filter("route_geometry", "st_dwithin", filter_value)
+                .limit(500)
+                .execute()
+            )
+            ids = {str(row.get("id")) for row in (response.data or []) if row.get("id")}
+            return ids, "postgis_st_dwithin"
+        except Exception as exc:
+            last_error = exc
+            continue
+
+    if last_error:
+        return None, f"postgis_unavailable:{last_error}"
+    return None, "postgis_unavailable"
+
+
+def _fetch_existing_events(
+    candidate_start_dt: datetime,
+    candidate_end_dt: datetime,
+    limit: int = 500,
+) -> Tuple[List[Dict[str, Any]], str]:
+    rows = []
+    start_iso = candidate_start_dt.isoformat()
+    end_iso = candidate_end_dt.isoformat()
+    query_variants = [
+        "status, events!inner(id, name, category, start_time, end_time, latitude, longitude, is_moving_procession, route_timeline, route_geometry)",
+        "status, events!inner(id, name, category, start_time, end_time, latitude, longitude, is_moving_procession, route_geometry)",
+        "status, events!inner(id, name, category, start_time, end_time, latitude, longitude, is_moving_procession, route_timeline)",
+        "status, events!inner(id, name, category, start_time, end_time, latitude, longitude, is_moving_procession)",
+    ]
+
+    source = "window_query_failed"
     for query in query_variants:
         try:
             response = (
                 db.table("applications")
                 .select(query)
-                .order("submitted_at", desc=True)
+                .lte("events.start_time", end_iso)
+                .gte("events.end_time", start_iso)
                 .limit(limit)
                 .execute()
             )
             rows = response.data or []
+            source = "applications_events_overlap_48h"
             break
         except Exception:
             rows = []
@@ -257,28 +455,25 @@ def _fetch_existing_events(limit: int = 400) -> List[Dict[str, Any]]:
         if not isinstance(event, dict):
             continue
 
-        start_raw = event.get("start_time")
-        end_raw = event.get("end_time")
-        start_dt = None
-        end_dt = None
-        if start_raw:
-            try:
-                start_dt = datetime.fromisoformat(str(start_raw).replace("Z", "+00:00")).replace(tzinfo=None)
-            except ValueError:
-                start_dt = _parse_datetime(str(start_raw)[:10], str(start_raw)[11:16] if "T" in str(start_raw) else None)
-        if end_raw:
-            try:
-                end_dt = datetime.fromisoformat(str(end_raw).replace("Z", "+00:00")).replace(tzinfo=None)
-            except ValueError:
-                end_dt = _parse_datetime(str(end_raw)[:10], str(end_raw)[11:16] if "T" in str(end_raw) else None)
+        start_dt = _parse_event_datetime(event.get("start_time"))
+        end_dt = _parse_event_datetime(event.get("end_time"))
         if start_dt is None:
             continue
         if end_dt is None or end_dt <= start_dt:
             end_dt = start_dt + timedelta(hours=4)
+        if _event_overlap_minutes(candidate_start_dt, candidate_end_dt, start_dt, end_dt) <= 0:
+            continue
 
         timeline = _parse_timeline(event.get("route_timeline"))
+        timeline_source = "route_timeline"
+        if not timeline:
+            geometry_points = _parse_route_geometry_points(event.get("route_geometry"))
+            timeline = _timeline_from_route_points(geometry_points, start_dt, end_dt, "Route geometry")
+            if timeline:
+                timeline_source = "route_geometry"
         if not timeline:
             timeline = _build_fallback_timeline(event.get("latitude"), event.get("longitude"))
+            timeline_source = "point_fallback"
         if not timeline:
             continue
 
@@ -291,10 +486,12 @@ def _fetch_existing_events(limit: int = 400) -> List[Dict[str, Any]]:
                 "start_dt": start_dt,
                 "end_dt": end_dt,
                 "timeline": timeline,
+                "timeline_source": timeline_source,
+                "has_route_geometry": event.get("route_geometry") is not None,
                 "is_moving_procession": _coerce_bool(event.get("is_moving_procession")),
             }
         )
-    return events
+    return events, source
 
 
 def _event_overlap_minutes(start_a: datetime, end_a: datetime, start_b: datetime, end_b: datetime) -> float:
@@ -303,12 +500,21 @@ def _event_overlap_minutes(start_a: datetime, end_a: datetime, start_b: datetime
     return max((earliest_end - latest_start).total_seconds() / 60.0, 0.0)
 
 
-def _severity_from(distance_m: float, time_diff_min: float) -> str:
-    if distance_m <= 50 and time_diff_min <= 15:
+def _severity_from(
+    distance_m: float,
+    time_diff_min: float,
+    spatial_threshold_m: float,
+    temporal_threshold_min: int,
+) -> str:
+    # "SEVERE" is only valid when both spatial + temporal strict bounds are met.
+    severe_distance = min(50.0, spatial_threshold_m)
+    severe_time = min(15.0, float(temporal_threshold_min))
+
+    if distance_m <= severe_distance and time_diff_min <= severe_time:
         return "SEVERE"
-    if distance_m <= 100 and time_diff_min <= 30:
+    if distance_m <= min(100.0, spatial_threshold_m) and time_diff_min <= min(30.0, float(temporal_threshold_min)):
         return "HIGH"
-    if distance_m <= 150 and time_diff_min <= 45:
+    if distance_m <= min(150.0, spatial_threshold_m) and time_diff_min <= min(45.0, float(temporal_threshold_min)):
         return "MEDIUM"
     return "LOW"
 
@@ -371,7 +577,12 @@ def _route_collision_profile(
                 if distance_m > spatial_threshold_m:
                     continue
 
-                severity = _severity_from(distance_m, time_diff)
+                severity = _severity_from(
+                    distance_m,
+                    time_diff,
+                    spatial_threshold_m=spatial_threshold_m,
+                    temporal_threshold_min=temporal_threshold_min,
+                )
                 score = (
                     5.0 if severity == "SEVERE"
                     else 3.0 if severity == "HIGH"
@@ -424,13 +635,36 @@ def analyze_route_collision(payload: Dict[str, Any]) -> Dict[str, Any]:
         raise CollisionEngineError("Collision payload must be a JSON object.")
 
     is_moving = _coerce_bool(payload.get("isMovingProcession") or payload.get("is_moving_procession"))
+    spatial_threshold_m = _coerce_float(
+        payload.get("spatialThresholdMeters") if payload.get("spatialThresholdMeters") is not None else payload.get("spatial_threshold_meters"),
+        default=100.0,
+    )
+    temporal_threshold_min = _coerce_int(
+        payload.get("temporalThresholdMinutes") if payload.get("temporalThresholdMinutes") is not None else payload.get("temporal_threshold_minutes"),
+        default=30,
+    )
+    spatial_threshold_m = max(spatial_threshold_m, 25.0)
+    temporal_threshold_min = max(temporal_threshold_min, 5)
+
     if not is_moving:
         return {
             "status": "success",
             "collision_status": "NOT_APPLICABLE",
-            "message": "4D collision checks apply to moving processions only.",
-            "recommendations": ["Enable moving procession and provide route origin/destination for collision analysis."],
+            "thresholds": {
+                "spatial_threshold_meters": spatial_threshold_m,
+                "temporal_threshold_minutes": temporal_threshold_min,
+            },
+            "selected_route": None,
             "route_options": [],
+            "warnings": [],
+            "summary": {
+                "routes_evaluated": 0,
+                "existing_events_compared": 0,
+                "selected_route_conflicts": 0,
+                "selected_route_severe_conflicts": 0,
+            },
+            "recommendations": ["Enable moving procession and provide route origin/destination for collision analysis."],
+            "message": "4D collision checks apply to moving processions only.",
         }
 
     origin = str(payload.get("routeOrigin") or payload.get("route_origin") or "").strip()
@@ -452,28 +686,45 @@ def analyze_route_collision(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     mode = str(payload.get("mode") or "walking").strip().lower()
     alternatives = _coerce_bool(payload.get("alternatives") if payload.get("alternatives") is not None else True)
-    spatial_threshold_m = _coerce_float(
-        payload.get("spatialThresholdMeters") if payload.get("spatialThresholdMeters") is not None else payload.get("spatial_threshold_meters"),
-        default=100.0,
-    )
-    temporal_threshold_min = _coerce_int(
-        payload.get("temporalThresholdMinutes") if payload.get("temporalThresholdMinutes") is not None else payload.get("temporal_threshold_minutes"),
-        default=30,
-    )
-    spatial_threshold_m = max(spatial_threshold_m, 25.0)
-    temporal_threshold_min = max(temporal_threshold_min, 5)
 
-    route_options = _fetch_route_options(origin, destination, mode=mode, alternatives=alternatives)
-    existing_events = _fetch_existing_events()
+    route_fetch_error = ""
+    route_source = "google_directions"
+    try:
+        route_options = _fetch_route_options(origin, destination, mode=mode, alternatives=alternatives)
+    except CollisionEngineError as exc:
+        route_fetch_error = str(exc)
+        route_source = "simulated_fallback"
+        route_options = _build_simulated_route_options(
+            origin=origin,
+            destination=destination,
+            payload=payload,
+            start_dt=start_dt,
+            end_dt=end_dt,
+        )
+
+    existing_events, history_source = _fetch_existing_events(start_dt, end_dt)
 
     enriched_routes = []
     route_profiles = []
+    postgis_modes: List[str] = []
     for route in route_options:
+        candidate_wkt = _build_candidate_linestring_wkt(route)
+        postgis_ids, postgis_mode = _fetch_postgis_spatial_event_ids(
+            candidate_start_dt=start_dt,
+            candidate_end_dt=end_dt,
+            candidate_linestring_wkt=candidate_wkt,
+            spatial_threshold_m=spatial_threshold_m,
+        )
+        postgis_modes.append(postgis_mode)
+        scoped_existing_events = existing_events
+        if postgis_ids is not None:
+            scoped_existing_events = [event for event in existing_events if event["id"] in postgis_ids]
+
         profile = _route_collision_profile(
             route=route,
             candidate_start_dt=start_dt,
             candidate_end_dt=end_dt,
-            existing_events=existing_events,
+            existing_events=scoped_existing_events,
             spatial_threshold_m=spatial_threshold_m,
             temporal_threshold_min=temporal_threshold_min,
         )
@@ -487,6 +738,7 @@ def analyze_route_collision(payload: Dict[str, Any]) -> Dict[str, Any]:
                     "severe_conflict_count": profile["severe_conflict_count"],
                     "top_warning": profile["warnings"][0] if profile["warnings"] else None,
                 },
+                "postgis_prefilter_mode": postgis_mode,
             }
         )
 
@@ -511,12 +763,17 @@ def analyze_route_collision(payload: Dict[str, Any]) -> Dict[str, Any]:
     ) or best_route
 
     collision_status = _overall_status(selected_profile)
+    if route_fetch_error:
+        collision_status = "UNKNOWN"
     all_warnings = selected_profile["warnings"]
 
     recommendations = []
     if collision_status == "SAFE":
         recommendations.append("No critical spatio-temporal clashes detected for the selected route.")
         recommendations.append("Share route and timings with traffic/police for operational confirmation.")
+    elif collision_status == "UNKNOWN":
+        recommendations.append("Route API is unavailable; collision status is provisional.")
+        recommendations.append("Re-run route analysis once Google Directions is reachable and confirm with authorities.")
     elif collision_status == "SEVERE_WARNING":
         recommendations.append("High-risk route collision detected. Choose an alternate route or adjust schedule.")
         recommendations.append("Coordinate immediate route revision with traffic and police authorities.")
@@ -540,6 +797,10 @@ def analyze_route_collision(payload: Dict[str, Any]) -> Dict[str, Any]:
             "existing_events_compared": len(existing_events),
             "selected_route_conflicts": selected_profile["conflict_count"],
             "selected_route_severe_conflicts": selected_profile["severe_conflict_count"],
+            "temporal_filter_source": history_source,
+            "route_source": route_source,
+            "route_fetch_error": route_fetch_error or None,
+            "postgis_prefilter_modes": list(dict.fromkeys(postgis_modes)),
         },
         "recommendations": recommendations,
         "model_version": "collision-4d-v1",

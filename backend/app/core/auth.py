@@ -108,17 +108,35 @@ async def get_current_user(authorization: Optional[str] = Header(default=None)) 
 
 def fetch_user_profile(user_id: str) -> Optional[Dict[str, Any]]:
     """Fetch extended user profile from users table"""
-    try:
-        response = (
-            db.table("users")
-            .select("id, name, email, phone, role, is_verified, created_at")
-            .eq("id", user_id)
-            .limit(1)
-            .execute()
-        )
-        return first_row(response.data)
-    except Exception:
-        return None
+    query_variants = [
+        "id, prefix, name, email, phone, role, organization_type, is_active, created_at",
+        "id, name, email, phone, role, created_at",
+        "*",
+    ]
+
+    for query in query_variants:
+        try:
+            response = (
+                db.table("users")
+                .select(query)
+                .eq("id", user_id)
+                .limit(1)
+                .execute()
+            )
+            row = first_row(response.data)
+            if not row:
+                continue
+            return {
+                **row,
+                "full_name": row.get("full_name") or row.get("name"),
+                "phone_number": row.get("phone_number") or row.get("phone"),
+                "department": row.get("department") or row.get("role"),
+                "organization": row.get("organization") or row.get("organization_type"),
+                "username": row.get("username") or row.get("prefix") or row.get("email"),
+            }
+        except Exception:
+            continue
+    return None
 
 
 def ensure_user_profile_exists(user_id: str, email: str, metadata: Dict[str, Any] = None) -> Dict[str, Any]:
@@ -126,19 +144,61 @@ def ensure_user_profile_exists(user_id: str, email: str, metadata: Dict[str, Any
     existing_profile = fetch_user_profile(user_id)
     if existing_profile:
         return existing_profile
-    
-    try:
-        profile_data = {
+
+    metadata = metadata or {}
+    role = str(metadata.get("department") or metadata.get("role") or "Organizer")
+    role = role if role else "Organizer"
+    prefix_map = {
+        "Police": "P",
+        "Fire": "FB",
+        "Traffic": "T",
+        "Municipality": "M",
+        "Admin": "A",
+        "Organizer": "U",
+    }
+    prefix_seed = str(user_id).replace("-", "").upper()[:6]
+    generated_prefix = f"{prefix_map.get(role, 'U')}-{prefix_seed}"
+
+    payload_candidates = [
+        {
             "id": user_id,
             "email": email,
-            "name": metadata.get("full_name", email.split("@")[0]) if metadata else email.split("@")[0],
-            "phone": metadata.get("phone_number") if metadata and metadata.get("phone_number") else f"NA-{user_id[:12]}",
-            "role": "Organizer",  # Default role
-            "is_verified": False,
-        }
-        
-        response = db.table("users").insert(profile_data).execute()
-        return first_row(response.data) or profile_data
-    except Exception as e:
-        # User profile might already exist, return what we can
-        return {"id": user_id, "email": email, "name": email.split("@")[0]}
+            "name": metadata.get("full_name", email.split("@")[0]),
+            "phone": metadata.get("phone_number") or f"NA-{user_id[:12]}",
+            "role": role,
+            "prefix": metadata.get("username") or generated_prefix,
+            "organization_type": metadata.get("organization"),
+            "is_active": True,
+        },
+        {
+            "id": user_id,
+            "email": email,
+            "name": metadata.get("full_name", email.split("@")[0]),
+            "phone": metadata.get("phone_number") or f"NA-{user_id[:12]}",
+            "role": role,
+            "prefix": metadata.get("username") or generated_prefix,
+            "organization_type": metadata.get("organization"),
+        },
+        {
+            "id": user_id,
+            "email": email,
+            "name": metadata.get("full_name", email.split("@")[0]),
+            "phone": metadata.get("phone_number") or f"NA-{user_id[:12]}",
+            "role": role,
+        },
+    ]
+
+    try:
+        for profile_data in payload_candidates:
+            try:
+                response = db.table("users").upsert(profile_data).execute()
+                row = first_row(response.data)
+                if row:
+                    return row
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+    # User profile might already exist, return what we can
+    return {"id": user_id, "email": email, "name": email.split("@")[0], "role": role}

@@ -432,17 +432,26 @@ def _build_noc_pdf(bundle: Dict[str, Any]) -> BytesIO:
 
 def _get_department_routing(app_id: str, department: str) -> Dict[str, Any]:
     for department_candidate in _routing_department_candidates(department):
-        response = (
-            db.table("department_routings")
-            .select("id, app_id, department, status, reviewed_by, reviewed_at, rejection_reason")
-            .eq("app_id", app_id)
-            .eq("department", department_candidate)
-            .limit(1)
-            .execute()
-        )
-        row = first_row(response.data)
-        if row:
-            return row
+        for select_query in (
+            "id, app_id, department, status, reviewed_by, reviewed_at, rejection_reason",
+            "id, app_id, department, status, reviewed_at, rejection_reason",
+            "id, app_id, department, status, rejection_reason",
+            "*",
+        ):
+            try:
+                response = (
+                    db.table("department_routings")
+                    .select(select_query)
+                    .eq("app_id", app_id)
+                    .eq("department", department_candidate)
+                    .limit(1)
+                    .execute()
+                )
+                row = first_row(response.data)
+                if row:
+                    return row
+            except Exception:
+                continue
     raise HTTPException(status_code=404, detail="No routing record found for this department")
 
 
@@ -452,6 +461,42 @@ def _routing_department_candidates(department: str) -> List[str]:
     if base and not base.lower().endswith("department"):
         candidates.append(f"{base} Department")
     return [item for item in dict.fromkeys(candidates) if item]
+
+
+def _update_department_routing_by_app_dept(app_id: str, department: str, payload: Dict[str, Any]):
+    variants = [payload]
+    if "reviewed_by" in payload:
+        variants.append({k: v for k, v in payload.items() if k != "reviewed_by"})
+
+    last_error: Optional[Exception] = None
+    for candidate in variants:
+        try:
+            return (
+                db.table("department_routings")
+                .update(candidate)
+                .eq("app_id", app_id)
+                .eq("department", department)
+                .execute()
+            )
+        except Exception as exc:
+            last_error = exc
+            continue
+    raise last_error or Exception("Failed to update department routing")
+
+
+def _update_department_routing_by_id(routing_id: str, payload: Dict[str, Any]):
+    variants = [payload]
+    if "reviewed_by" in payload:
+        variants.append({k: v for k, v in payload.items() if k != "reviewed_by"})
+
+    last_error: Optional[Exception] = None
+    for candidate in variants:
+        try:
+            return db.table("department_routings").update(candidate).eq("id", routing_id).execute()
+        except Exception as exc:
+            last_error = exc
+            continue
+    raise last_error or Exception("Failed to update department routing")
 
 
 @router.get("/api/dept/applications")
@@ -639,18 +684,14 @@ async def mark_application_in_review(app_id: str, current=Depends(get_current_us
             updated_row = None
             for status_candidate in ["In Review", "Review", "Pending"]:
                 try:
-                    updated = (
-                        db.table("department_routings")
-                        .update(
-                            {
-                                "status": status_candidate,
-                                "reviewed_by": current["user"]["id"],
-                                "reviewed_at": datetime.now(UTC).isoformat(),
-                            }
-                        )
-                        .eq("app_id", app_id)
-                        .eq("department", matched_department)
-                        .execute()
+                    updated = _update_department_routing_by_app_dept(
+                        app_id=app_id,
+                        department=matched_department,
+                        payload={
+                            "status": status_candidate,
+                            "reviewed_by": current["user"]["id"],
+                            "reviewed_at": datetime.now(UTC).isoformat(),
+                        },
                     )
                     updated_row = first_row(updated.data)
                     if updated_row:
@@ -722,12 +763,10 @@ async def update_department_action(
                 candidate_payload = {**update_payload, "status": status_candidate}
                 candidate_payload["reviewed_by"] = current["user"]["id"]
                 candidate_payload["reviewed_at"] = datetime.now(UTC).isoformat()
-                response = (
-                    db.table("department_routings")
-                    .update(candidate_payload)
-                    .eq("app_id", app_id)
-                    .eq("department", target_department)
-                    .execute()
+                response = _update_department_routing_by_app_dept(
+                    app_id=app_id,
+                    department=target_department,
+                    payload=candidate_payload,
                 )
                 if response.data:
                     break
@@ -773,14 +812,24 @@ async def raise_query(payload: RaiseQueryRequest, current=Depends(get_current_us
             )
             .execute()
         )
-        db.table("department_routings").update(
-            {
-                "status": "Query Raised",
-                "rejection_reason": payload.query_text,
-                "reviewed_by": current["user"]["id"],
-                "reviewed_at": datetime.now(UTC).isoformat(),
-            }
-        ).eq("id", routing_row["id"]).execute()
+        updated = None
+        for status_candidate in ("Query Raised", "Query", "In Review"):
+            try:
+                updated = _update_department_routing_by_id(
+                    routing_id=str(routing_row["id"]),
+                    payload={
+                        "status": status_candidate,
+                        "rejection_reason": payload.query_text,
+                        "reviewed_by": current["user"]["id"],
+                        "reviewed_at": datetime.now(UTC).isoformat(),
+                    },
+                )
+                if updated.data:
+                    break
+            except Exception:
+                continue
+        if not updated:
+            raise HTTPException(status_code=500, detail="Failed to update routing status for query raise")
         _sync_application_status(payload.app_id)
 
         return {

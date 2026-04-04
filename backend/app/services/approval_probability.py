@@ -141,24 +141,49 @@ def _parse_event_row(row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     }
 
 
-def _fetch_historical_events(limit: int = 1200) -> Tuple[List[Dict[str, Any]], str]:
+def _fetch_historical_events(candidate_start_dt: datetime, window_hours: int = 48) -> Tuple[List[Dict[str, Any]], str]:
+    window_start = (candidate_start_dt - timedelta(hours=window_hours)).isoformat()
+    window_end = (candidate_start_dt + timedelta(hours=window_hours)).isoformat()
+
     try:
-        response = (
-            db.table("applications")
-            .select(
-                "status, submitted_at, events(category, expected_crowd, start_time, end_time, latitude, longitude, is_moving_procession)"
-            )
-            .order("submitted_at", desc=True)
-            .limit(limit)
+        # Query only events in the +/-48h temporal window around the candidate.
+        events_response = (
+            db.table("events")
+            .select("id, category, expected_crowd, start_time, end_time, latitude, longitude, is_moving_procession")
+            .gte("start_time", window_start)
+            .lte("start_time", window_end)
+            .limit(500)
             .execute()
         )
-        rows = response.data or []
-        parsed = []
-        for row in rows:
-            parsed_row = _parse_event_row(row)
+        event_rows = events_response.data or []
+        if not event_rows:
+            return [], "window_no_events"
+
+        event_by_id = {row.get("id"): row for row in event_rows if row.get("id")}
+        event_ids = list(event_by_id.keys())
+        if not event_ids:
+            return [], "window_no_event_ids"
+
+        # Fetch only applications tied to those window-filtered events.
+        applications_response = (
+            db.table("applications")
+            .select("status, event_id")
+            .in_("event_id", event_ids)
+            .limit(500)
+            .execute()
+        )
+        app_rows = applications_response.data or []
+
+        parsed: List[Dict[str, Any]] = []
+        for row in app_rows:
+            event = event_by_id.get(row.get("event_id"))
+            if not event:
+                continue
+            parsed_row = _parse_event_row({"status": row.get("status"), "events": event})
             if parsed_row:
                 parsed.append(parsed_row)
-        return parsed, "supabase_history"
+
+        return parsed, "supabase_window_48h"
     except Exception:
         return [], "fallback_no_history"
 
@@ -204,24 +229,35 @@ def _extract_candidate(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _base_approval_probability(candidate: Dict[str, Any], history: List[Dict[str, Any]]) -> Tuple[float, Dict[str, Any]]:
+    baseline = 0.85
     if not history:
-        return 0.62, {"source": "fallback_default", "global_total": 0, "type_total": 0}
+        return baseline, {"source": "fallback_default", "global_total": 0, "type_total": 0}
 
-    prior_mean = 0.62
-    prior_strength = 6.0
     approved_total = sum(1 for item in history if _is_approved_status(item["status"]))
-    global_rate = ((approved_total + (prior_mean * prior_strength)) / (len(history) + prior_strength))
+    rejected_total = sum(1 for item in history if _is_rejected_status(item["status"]))
+    window_rate = (approved_total + 3.0) / (len(history) + 4.0)
+    blended = (0.65 * baseline) + (0.35 * window_rate)
 
     event_type = candidate["event_type"].lower()
     same_type = [item for item in history if item["category"].strip().lower() == event_type and event_type]
-    if len(same_type) >= 6:
+    type_rate = None
+    if len(same_type) >= 3:
         same_type_approved = sum(1 for item in same_type if _is_approved_status(item["status"]))
-        type_rate = ((same_type_approved + (prior_mean * prior_strength)) / (len(same_type) + prior_strength))
-        # Smooth blend with global rate to avoid sharp swings.
-        blended = (0.7 * type_rate) + (0.3 * global_rate)
-        return blended, {"source": "type_blended", "global_total": len(history), "type_total": len(same_type)}
+        type_rate = (same_type_approved + 2.0) / (len(same_type) + 3.0)
+        blended = (0.7 * blended) + (0.3 * type_rate)
 
-    return global_rate, {"source": "global_only", "global_total": len(history), "type_total": len(same_type)}
+    rejection_ratio = rejected_total / max(len(history), 1)
+    if rejection_ratio > 0.55:
+        blended -= 0.04
+    elif rejection_ratio > 0.40:
+        blended -= 0.02
+
+    blended = max(0.60, min(0.93, blended))
+    return blended, {
+        "source": "window_blended" if type_rate is None else "type_window_blended",
+        "global_total": len(history),
+        "type_total": len(same_type),
+    }
 
 
 def _spatio_temporal_features(candidate: Dict[str, Any], history: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -280,12 +316,12 @@ def _risk_penalty_from_model(payload: Dict[str, Any]) -> Tuple[float, str]:
         risk_level = ""
 
     if risk_level == "high":
-        return 0.22, "high"
+        return 0.12, "high"
     if risk_level == "medium":
-        return 0.12, "medium"
+        return 0.05, "medium"
     if risk_level == "low":
-        return 0.05, "low"
-    return 0.1, "unknown"
+        return 0.0, "low"
+    return 0.03, "unknown"
 
 
 def _build_recommendations(candidate: Dict[str, Any], features: Dict[str, Any], band: str) -> List[str]:
@@ -311,54 +347,103 @@ def forecast_approval_probability(payload: Dict[str, Any]) -> Dict[str, Any]:
         raise ApprovalProbabilityError("Approval probability payload must be a JSON object.")
 
     candidate = _extract_candidate(payload)
-    history, data_source = _fetch_historical_events()
+    history, data_source = _fetch_historical_events(candidate["start_dt"], window_hours=48)
 
     base_prob, base_meta = _base_approval_probability(candidate, history)
     features = _spatio_temporal_features(candidate, history)
     risk_penalty, risk_label = _risk_penalty_from_model(payload)
 
+    crowd_size = candidate["crowd_size"]
+    crowd_bonus = 0.0
     crowd_penalty = 0.0
-    if candidate["crowd_size"] >= 5000:
-        crowd_penalty = 0.16
-    elif candidate["crowd_size"] >= 1000:
-        crowd_penalty = 0.1
-    elif candidate["crowd_size"] >= 300:
+    if crowd_size <= 300:
+        crowd_bonus = 0.06
+    elif crowd_size <= 1000:
+        crowd_bonus = 0.03
+        crowd_penalty = 0.01
+    elif crowd_size <= 3000:
         crowd_penalty = 0.05
+    elif crowd_size <= 7000:
+        crowd_penalty = 0.13
+    elif crowd_size <= 15000:
+        crowd_penalty = 0.24
     else:
-        crowd_penalty = 0.02
+        crowd_penalty = 0.34
 
-    congestion_penalty = min(0.24, (features["nearby_events"] * 0.06) + (features["concurrent_events"] * 0.015))
+    overlap_load_penalty = max(features["total_overlap_minutes"] - 180.0, 0.0) / 6000.0
+    congestion_penalty = min(
+        0.22,
+        (features["nearby_events"] * 0.045) + (features["concurrent_events"] * 0.01) + overlap_load_penalty,
+    )
+
     moving_penalty = 0.0
     if candidate["is_moving_procession"]:
-        moving_penalty = 0.05 + min(0.12, features["nearby_moving_events"] * 0.04)
+        moving_penalty = min(
+            0.18,
+            0.035 + (features["nearby_moving_events"] * 0.03) + (0.02 if features["concurrent_events"] >= 2 else 0.0),
+        )
 
     traffic_penalty = 0.0
     if candidate["road_closure_required"]:
-        traffic_penalty += 0.05
+        traffic_penalty += 0.04
     if candidate["traffic_impact"] == "high":
         traffic_penalty += 0.06
     elif candidate["traffic_impact"] == "medium":
         traffic_penalty += 0.03
+    elif candidate["traffic_impact"] == "low":
+        traffic_penalty += 0.01
 
-    lead_time_days = (
-        candidate["start_dt"].date() - datetime.now(UTC).date()
-    ).days
-    lead_time_bonus = 0.0
-    if lead_time_days >= 14:
-        lead_time_bonus = 0.05
+    lead_time_days = (candidate["start_dt"].date() - datetime.now(UTC).date()).days
+    lead_time_adjustment = 0.0
+    if lead_time_days >= 21:
+        lead_time_adjustment = 0.06
+    elif lead_time_days >= 14:
+        lead_time_adjustment = 0.05
     elif lead_time_days >= 7:
-        lead_time_bonus = 0.03
-    elif lead_time_days <= 1:
-        lead_time_bonus = -0.03
+        lead_time_adjustment = 0.03
+    elif lead_time_days >= 3:
+        lead_time_adjustment = 0.01
+    elif lead_time_days >= 1:
+        lead_time_adjustment = -0.02
+    else:
+        lead_time_adjustment = -0.05
 
-    probability = base_prob
-    probability -= risk_penalty
-    probability -= crowd_penalty
-    probability -= congestion_penalty
-    probability -= moving_penalty
-    probability -= traffic_penalty
-    probability += lead_time_bonus
-    probability = max(0.05, min(0.95, probability))
+    safety_bonus = 0.0
+    if not candidate["is_moving_procession"]:
+        safety_bonus += 0.02
+    if not candidate["road_closure_required"] and candidate["traffic_impact"] in {"", "low"}:
+        safety_bonus += 0.02
+    if features["concurrent_events"] == 0:
+        safety_bonus += 0.025
+    if candidate["has_coords"] and features["nearby_events"] == 0:
+        safety_bonus += 0.015
+    if risk_label == "low":
+        safety_bonus += 0.05
+    elif risk_label == "medium":
+        safety_bonus += 0.015
+    elif risk_label == "unknown":
+        safety_bonus -= 0.01
+
+    if (
+        crowd_size <= 300
+        and not candidate["is_moving_procession"]
+        and not candidate["road_closure_required"]
+        and features["concurrent_events"] == 0
+    ):
+        safety_bonus += 0.035
+
+    probability = (
+        base_prob
+        + crowd_bonus
+        + safety_bonus
+        + lead_time_adjustment
+        - risk_penalty
+        - crowd_penalty
+        - congestion_penalty
+        - moving_penalty
+        - traffic_penalty
+    )
+    probability = max(0.05, min(0.98, probability))
 
     percent = round(probability * 100.0, 2)
     if percent >= 70:
@@ -371,13 +456,20 @@ def forecast_approval_probability(payload: Dict[str, Any]) -> Dict[str, Any]:
         band = "LOW"
         band_label = "Low Likelihood"
 
+    positive_impact = max(crowd_bonus + safety_bonus + max(lead_time_adjustment, 0.0), 0.0)
     factors = [
         {"factor": "Historical approval baseline", "impact": round(base_prob * 100, 2), "direction": "positive"},
+        {"factor": "Safety/readiness boosters", "impact": round(positive_impact * 100, 2), "direction": "positive"},
         {"factor": "Risk model influence", "impact": round(risk_penalty * 100, 2), "direction": "negative", "risk_level": risk_label},
         {"factor": "Crowd-size pressure", "impact": round(crowd_penalty * 100, 2), "direction": "negative"},
         {"factor": "Spatio-temporal congestion", "impact": round(congestion_penalty * 100, 2), "direction": "negative"},
         {"factor": "Procession/mobility complexity", "impact": round(moving_penalty * 100, 2), "direction": "negative"},
-        {"factor": "Lead-time advantage", "impact": round(abs(lead_time_bonus) * 100, 2), "direction": "positive" if lead_time_bonus >= 0 else "negative"},
+        {"factor": "Traffic operations pressure", "impact": round(traffic_penalty * 100, 2), "direction": "negative"},
+        {
+            "factor": "Lead-time effect",
+            "impact": round(abs(lead_time_adjustment) * 100, 2),
+            "direction": "positive" if lead_time_adjustment >= 0 else "negative",
+        },
     ]
 
     return {
