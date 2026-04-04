@@ -34,6 +34,10 @@ const LoginPage = () => {
   return (
     <div className="flex min-h-screen items-center justify-center bg-lightBg px-4">
       <div className="w-full max-w-md rounded-xl border border-slate-200 bg-white p-6 shadow-card">
+        <div className="mb-3 flex items-center gap-3">
+          <img src="/ashoka-emblem.svg" alt="Ashoka Emblem" className="h-10 w-auto object-contain" />
+          <img src="/uttsav-logo.svg" alt="UTTSAV logo" className="h-12 w-auto object-contain" />
+        </div>
         <h1 className="text-[26px] font-semibold text-textPrimary">User Login</h1>
         <p className="mt-1 text-sm text-textSecondary">Access your UTTSAV organizer account.</p>
 

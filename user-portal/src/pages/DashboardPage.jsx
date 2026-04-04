@@ -41,17 +41,24 @@ const DashboardPage = () => {
       (item) => item.status === "Pending" || item.status === "In Review"
     ).length;
     const approved = safeApplications.filter((item) => item.status === "Approved").length;
+    const rejected = safeApplications.filter((item) => item.status === "Rejected").length;
 
     return {
       submitted,
       pending,
       approved,
+      rejected,
     };
   }, [applications]);
 
   return (
     <div className="space-y-6">
       <section className="rounded-xl border border-slate-200 bg-white p-6 shadow-card">
+        <div className="mb-3 flex flex-wrap items-center gap-2">
+          <span className="h-2.5 w-2.5 rounded-full bg-success" />
+          <span className="h-2.5 w-2.5 rounded-full bg-warning" />
+          <span className="h-2.5 w-2.5 rounded-full bg-danger" />
+        </div>
         <h2 className="text-[22px] font-semibold text-textPrimary">Welcome to UTTSAV</h2>
         <p className="mt-2 max-w-3xl text-[15px] text-textSecondary">
           Submit one smart event application, upload required documents, and track approvals from all
@@ -59,10 +66,11 @@ const DashboardPage = () => {
         </p>
       </section>
 
-      <section className="grid gap-4 md:grid-cols-3">
-        <StatsCard title="Applications Submitted" value={stats.submitted} />
-        <StatsCard title="Pending Approvals" value={stats.pending} className="border-[#F59E0B]" />
-        <StatsCard title="Approved Applications" value={stats.approved} className="border-[#16A34A]" />
+      <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+        <StatsCard title="Applications Submitted" value={stats.submitted} accent="neutral" />
+        <StatsCard title="Pending Approvals" value={stats.pending} accent="warning" />
+        <StatsCard title="Approved Applications" value={stats.approved} accent="success" />
+        <StatsCard title="Rejected Applications" value={stats.rejected} accent="danger" />
       </section>
 
       <section className="rounded-xl border border-slate-200 bg-white p-6 shadow-card">

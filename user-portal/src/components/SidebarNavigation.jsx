@@ -1,5 +1,6 @@
 import { X, LayoutDashboard, FilePlus2, FolderKanban, Bell, UserCircle2 } from "lucide-react";
 import { NavLink } from "react-router-dom";
+import { useState } from "react";
 
 const navItems = [
   { label: "Dashboard", to: "/dashboard", icon: LayoutDashboard },
@@ -10,6 +11,9 @@ const navItems = [
 ];
 
 const SidebarNavigation = ({ isOpen, onClose }) => {
+  const [isLogoVisible, setIsLogoVisible] = useState(true);
+  const [isEmblemVisible, setIsEmblemVisible] = useState(true);
+
   return (
     <>
       <div
@@ -22,9 +26,28 @@ const SidebarNavigation = ({ isOpen, onClose }) => {
         }`}
       >
         <div className="flex h-[76px] items-center justify-between border-b border-slate-200 px-5">
-          <div>
-            <p className="text-sm font-semibold text-govBlue">UTTSAV</p>
-            <p className="text-xs text-textSecondary">User Portal</p>
+          <div className="flex items-center gap-2">
+            {isEmblemVisible ? (
+              <img
+                src="/ashoka-emblem.svg"
+                alt="Ashoka Emblem"
+                className="h-9 w-auto object-contain"
+                onError={() => setIsEmblemVisible(false)}
+              />
+            ) : null}
+            {isLogoVisible ? (
+              <img
+                src="/uttsav-logo.svg"
+                alt="UTTSAV logo"
+                className="h-10 w-auto object-contain"
+                onError={() => setIsLogoVisible(false)}
+              />
+            ) : (
+              <div>
+                <p className="text-sm font-semibold text-govBlue">UTTSAV</p>
+                <p className="text-xs text-textSecondary">User Portal</p>
+              </div>
+            )}
           </div>
           <button
             type="button"

@@ -1,6 +1,5 @@
 import { useNavigate } from 'react-router-dom';
 import RiskBadge from './RiskBadge';
-import SLAChip from './SLAChip';
 
 const ApplicationCard = ({ application, status }) => {
   const navigate = useNavigate();
@@ -29,9 +28,8 @@ const ApplicationCard = ({ application, status }) => {
         </div>
       </div>
 
-      <div className="mt-4 flex items-center justify-between text-sm text-textSecondary">
+      <div className="mt-4 text-sm text-textSecondary">
         <span>Crowd Size: {application.crowdSize.toLocaleString()}</span>
-        <SLAChip dueAt={application.dueAt} />
       </div>
     </div>
   );

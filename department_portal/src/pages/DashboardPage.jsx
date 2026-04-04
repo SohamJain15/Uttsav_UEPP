@@ -2,20 +2,12 @@ import { Link } from 'react-router-dom';
 import EmptyState from '../components/EmptyState';
 import JurisdictionMapPanel from '../components/JurisdictionMapPanel';
 import RiskBadge from '../components/RiskBadge';
-import SLAChip from '../components/SLAChip';
 import SummaryCard from '../components/SummaryCard';
 import { useAuth } from '../context/AuthContext';
 import { usePortalUi } from '../context/PortalUiContext';
 import { useDepartmentData } from '../hooks/useDepartmentData';
 import { getDepartmentStatus, isDateToday, matchesApplicationSearch } from '../utils/application';
 import { getSlaMeta } from '../utils/sla';
-
-const priorityTone = {
-  Critical: 'bg-statusRed/10 text-statusRed border border-statusRed/35',
-  High: 'bg-statusYellow/10 text-statusYellow border border-statusYellow/35',
-  Medium: 'bg-primary/10 text-primary border border-primary/30',
-  Low: 'bg-statusGreen/10 text-statusGreen border border-statusGreen/35',
-};
 
 const DashboardPage = () => {
   const { user } = useAuth();
@@ -71,6 +63,11 @@ const DashboardPage = () => {
   return (
     <div className="space-y-6">
       <div>
+        <div className="mb-2 flex items-center gap-2">
+          <span className="h-2.5 w-2.5 rounded-full bg-statusGreen" />
+          <span className="h-2.5 w-2.5 rounded-full bg-statusYellow" />
+          <span className="h-2.5 w-2.5 rounded-full bg-statusRed" />
+        </div>
         <h1 className="text-2xl font-bold text-textMain">Department Dashboard</h1>
         <p className="text-sm text-textSecondary">
           Operational clearance control panel for {user?.departmentLabel || 'Department Team'}
@@ -107,6 +104,13 @@ const DashboardPage = () => {
             {pendingApplications.length ? (
               pendingApplications.map((application) => {
                 const slaMeta = getSlaMeta(application.dueAt);
+                const rawStatus = getDepartmentStatus(application, role);
+                const approvalStatus =
+                  rawStatus === 'Approved'
+                    ? 'Accepted'
+                    : rawStatus === 'Rejected'
+                      ? 'Rejected'
+                      : 'Pending';
                 const urgencyBorder =
                   slaMeta.tone === 'breached'
                     ? 'border-statusRed/45'
@@ -118,26 +122,18 @@ const DashboardPage = () => {
                   <Link
                     key={application.id}
                     to={`/application/${application.id}`}
-                    className={`flex flex-col gap-4 rounded-2xl border bg-cardBg p-4 shadow-card transition hover:border-primary/40 lg:flex-row lg:items-center lg:justify-between ${urgencyBorder}`}
+                    className={`flex flex-col gap-3 rounded-2xl border bg-cardBg p-4 shadow-card transition hover:border-primary/40 sm:flex-row sm:items-center sm:justify-between ${urgencyBorder}`}
                   >
-                    <div>
+                    <div className="min-w-0 flex-1">
                       <p className="text-xs text-textSecondary">{application.id}</p>
                       <h3 className="text-lg font-semibold text-textMain">{application.eventName}</h3>
                       <p className="text-sm text-textSecondary">
                         {application.venue} - {application.area}, {application.pincode}
                       </p>
                     </div>
-                    <div className="flex flex-wrap items-center gap-3">
-                      <span
-                        className={`rounded-xl px-2.5 py-1 text-xs font-semibold ${
-                          priorityTone[slaMeta.priority] ?? priorityTone.Medium
-                        }`}
-                      >
-                        {slaMeta.priority} Priority
-                      </span>
+                    <div className="flex shrink-0 items-center gap-2 whitespace-nowrap">
+                      <RiskBadge riskLevel={approvalStatus} isStatus />
                       <RiskBadge riskLevel={application.riskLevel} />
-                      <RiskBadge riskLevel={getDepartmentStatus(application, role)} isStatus />
-                      <SLAChip dueAt={application.dueAt} />
                     </div>
                   </Link>
                 );

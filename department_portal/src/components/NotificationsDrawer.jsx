@@ -24,7 +24,7 @@ const buildNotifications = (applications, role) => {
         id: `${application.id}-sla-urgent`,
         type: 'SLA Warning',
         tone: 'warning',
-        message: `${application.id} is nearing SLA deadline (${slaMeta.label}).`
+        message: `${application.id} is nearing SLA deadline.`
       });
     }
 

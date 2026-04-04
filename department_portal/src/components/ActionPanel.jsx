@@ -102,7 +102,7 @@ const ActionPanel = ({
       ) : null}
       {isUrgentByTime ? (
         <p className="mt-2 rounded-xl bg-statusYellow/10 px-3 py-2 text-sm font-semibold text-statusYellow">
-          Time Priority: {slaMeta.priority} ({slaMeta.label}). Review and decide quickly.
+          Time Priority: {slaMeta.priority}. Review and decide quickly.
         </p>
       ) : null}
 

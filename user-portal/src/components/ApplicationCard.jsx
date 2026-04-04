@@ -10,10 +10,10 @@ const ApplicationCard = ({ application }) => {
   };
 
   const statusTone = {
-    Pending: { label: "Under Review", className: "text-[#F59E0B]" },
-    "In Review": { label: "Under Review", className: "text-[#F59E0B]" },
-    Approved: { label: "Approved", className: "text-[#16A34A]" },
-    Rejected: { label: "Rejected", className: "text-[#DC2626]" },
+    Pending: { label: "Under Review", className: "text-[#92400E] bg-[#FFFBEB] border border-[#FCD34D]" },
+    "In Review": { label: "Under Review", className: "text-[#92400E] bg-[#FFFBEB] border border-[#FCD34D]" },
+    Approved: { label: "Approved", className: "text-[#166534] bg-[#F0FDF4] border border-[#86EFAC]" },
+    Rejected: { label: "Rejected", className: "text-[#991B1B] bg-[#FEF2F2] border border-[#FCA5A5]" },
   };
 
   const pendingDepartment = (application.departments || []).find(
@@ -30,7 +30,7 @@ const ApplicationCard = ({ application }) => {
   return (
     <Link
       to={`/applications/${application.id}`}
-      className="block rounded-xl border border-slate-200 bg-cardBg p-5 shadow-card transition hover:border-slate-300"
+      className="block rounded-xl border border-slate-200 bg-cardBg p-5 shadow-card transition hover:border-[#BFDBFE]"
     >
       <article>
         <div className="flex items-start justify-between gap-3">
@@ -46,7 +46,7 @@ const ApplicationCard = ({ application }) => {
           >
             {(application.riskLevel || "Medium").toUpperCase()} RISK
           </span>
-          <span className={`text-[13px] font-medium ${status.className}`}>{status.label}</span>
+          <span className={`rounded-full px-2.5 py-0.5 text-[12px] font-medium ${status.className}`}>{status.label}</span>
         </div>
 
         <div className="mt-3 space-y-2">

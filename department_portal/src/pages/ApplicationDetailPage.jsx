@@ -5,7 +5,6 @@ import DocumentRow from '../components/DocumentRow';
 import EmptyState from '../components/EmptyState';
 import ProgressTracker from '../components/ProgressTracker';
 import RiskBadge from '../components/RiskBadge';
-import SLAChip from '../components/SLAChip';
 import Toast from '../components/Toast';
 import { useAuth } from '../context/AuthContext';
 import { useDepartmentData } from '../hooks/useDepartmentData';
@@ -207,7 +206,6 @@ const ApplicationDetailPage = () => {
         </div>
         <div className="flex items-center gap-2">
           <RiskBadge riskLevel={application.riskLevel} />
-          <SLAChip dueAt={application.dueAt} />
         </div>
       </div>
 

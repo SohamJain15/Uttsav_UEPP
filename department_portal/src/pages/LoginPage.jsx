@@ -28,7 +28,10 @@ const LoginPage = () => {
   return (
     <div className="flex min-h-screen items-center justify-center bg-pageBg px-4">
       <div className="w-full max-w-md rounded-2xl border border-borderMain bg-cardBg p-8 shadow-card">
-        <p className="text-xs font-semibold uppercase tracking-wide text-primary">UTTSAV</p>
+        <div className="mb-3 flex items-center gap-3">
+          <img src="/ashoka-emblem.svg" alt="Ashoka Emblem" className="h-10 w-auto object-contain" />
+          <img src="/uttsav-logo.svg" alt="UTTSAV logo" className="h-12 w-auto object-contain" />
+        </div>
         <h1 className="mt-2 text-2xl font-bold text-textMain">Department Portal Login</h1>
         <p className="mt-2 text-sm text-textSecondary">
           Sign in with your department username and password.
